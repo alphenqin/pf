@@ -13,17 +13,24 @@ const processorPrefix = "processor_"
 // ProcessorConfig 包含 processor 的所有配置项
 // 配置来源：pmacct.conf 中以 processor_ 开头的 key: value 行（可注释）
 type ProcessorConfig struct {
-	FTPHost           string
-	FTPPort           int
-	FTPUser           string
-	FTPPass           string
-	FTPDir            string
-	RotateIntervalSec int
-	RotateSizeMB      int
-	FilePrefix        string
-	UploadIntervalSec int
-	Timezone          string // 时区，例如 "Asia/Shanghai" 或 "UTC+8"，默认为 "Asia/Shanghai"
-	StatusReport      StatusReportConfig
+	FTPHost              string
+	FTPPort              int
+	FTPUser              string
+	FTPPass              string
+	FTPDir               string
+	FTPOptions           FTPOptions // FTP选项配置
+	RotateIntervalSec    int
+	RotateSizeMB         int
+	FilePrefix           string
+	UploadIntervalSec    int
+	DebugPrintInterval   int // 调试打印间隔（行数），默认为0（不打印）
+	DebugPrintStartLines int // 调试打印开始行数，前N行会打印，默认为0（不打印）
+	StatusReport         StatusReportConfig
+}
+
+// FTPOptions FTP选项配置
+type FTPOptions struct {
+	TimeoutSec int // FTP操作超时时间（秒）
 }
 
 // StatusReportConfig 状态上报配置
@@ -38,9 +45,8 @@ type StatusReportConfig struct {
 }
 
 // parseProcessorConfig 解析 pmacct.conf 中的 processor_* 配置行
-// 支持两种形式：
-// 1) processor_foo: value
-// 2) # processor_foo: value
+// 仅解析未注释行：
+// processor_foo: value
 func parseProcessorConfig(content string) map[string]string {
 	kv := make(map[string]string)
 	scanner := bufio.NewScanner(strings.NewReader(content))
@@ -50,20 +56,12 @@ func parseProcessorConfig(content string) map[string]string {
 			continue
 		}
 
-		isComment := false
 		if strings.HasPrefix(line, "#") {
-			isComment = true
-			line = strings.TrimSpace(strings.TrimPrefix(line, "#"))
-			if line == "" {
-				continue
-			}
+			continue
 		}
 
 		lower := strings.ToLower(line)
 		if !strings.HasPrefix(lower, processorPrefix) {
-			if isComment {
-				continue
-			}
 			continue
 		}
 
@@ -127,7 +125,6 @@ func LoadConfig(configPath string) (*ProcessorConfig, error) {
 	cfg.FTPPass = kv[processorPrefix+"ftp_pass"]
 	cfg.FTPDir = kv[processorPrefix+"ftp_dir"]
 	cfg.FilePrefix = kv[processorPrefix+"file_prefix"]
-	cfg.Timezone = kv[processorPrefix+"timezone"]
 	cfg.StatusReport.URL = kv[processorPrefix+"status_report_url"]
 	cfg.StatusReport.UUID = kv[processorPrefix+"status_report_uuid"]
 	cfg.StatusReport.FilePath = kv[processorPrefix+"status_report_file_path"]
@@ -181,6 +178,24 @@ func LoadConfig(configPath string) (*ProcessorConfig, error) {
 			cfg.StatusReport.FileBackups = num
 		}
 	}
+
+	// 解析FTP选项配置
+	if v, ok := kv[processorPrefix+"ftp_timeout"]; ok {
+		if num, err := strconv.Atoi(v); err != nil {
+			return nil, fmt.Errorf("processor_ftp_timeout 不是整数: %w", err)
+		} else {
+			cfg.FTPOptions.TimeoutSec = num
+		}
+	}
+
+	// 解析调试打印间隔配置
+	if v, ok := kv[processorPrefix+"debug_print_interval"]; ok {
+		if num, err := strconv.Atoi(v); err != nil {
+			return nil, fmt.Errorf("processor_debug_print_interval 不是整数: %w", err)
+		} else {
+			cfg.DebugPrintInterval = num
+		}
+	}
 	if v, ok := kv[processorPrefix+"status_report_enabled"]; ok {
 		b, err := parseBool(v)
 		if err != nil {
@@ -226,8 +241,14 @@ func validateConfig(cfg *ProcessorConfig) error {
 	if cfg.FTPDir == "" {
 		cfg.FTPDir = "/"
 	}
-	if cfg.Timezone == "" {
-		cfg.Timezone = "Asia/Shanghai" // 默认东八区
+	// 设置FTP选项默认值
+	if cfg.FTPOptions.TimeoutSec <= 0 {
+		cfg.FTPOptions.TimeoutSec = 60 // 默认60秒超时
+	}
+
+	// 设置调试打印间隔默认值
+	if cfg.DebugPrintInterval < 0 {
+		cfg.DebugPrintInterval = 0 // 默认不打印
 	}
 	if cfg.StatusReport.Enabled {
 		if cfg.StatusReport.IntervalSec < 1 {

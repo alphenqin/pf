@@ -77,33 +77,33 @@ GOOS=linux GOARCH=amd64 go build -o processor ./cmd/processor
 
 ### 配置文件格式
 
-所有 FTP 和滚动参数都配置在 `pmacct.conf` 文件的 `processor_*` 配置项中（可注释保留）： 
+所有 FTP 和滚动参数都配置在 `pmacct.conf` 文件的 `processor_*` 配置项中（注释行不会被解析）： 
 
 ```conf
 # pmacct 配置（略）
 pcap_interface: eth0
 
-# processor 配置（可注释）
-# processor_ftp_host: 10.0.0.10
-# processor_ftp_port: 21
-# processor_ftp_user: ftpuser
-# processor_ftp_pass: ftppass
-# processor_ftp_dir: /data/areaA
-#
-# processor_rotate_interval_sec: 600
-# processor_rotate_size_mb: 100
-# processor_file_prefix: flows_
-#
-# processor_upload_interval_sec: 600
-# processor_timezone: Asia/Shanghai
-#
-# processor_status_report_enabled: false
-# processor_status_report_url: http://127.0.0.1:8080/api/uploadStatus
-# processor_status_report_interval_sec: 60
-# processor_status_report_uuid:
-# processor_status_report_file_path:
-# processor_status_report_file_max_mb: 10
-# processor_status_report_file_backups: 0
+# processor 配置（不要注释，否则不会生效）
+processor_ftp_host: 10.0.0.10
+processor_ftp_port: 21
+processor_ftp_user: ftpuser
+processor_ftp_pass: ftppass
+processor_ftp_dir: /data/areaA
+
+processor_rotate_interval_sec: 600
+processor_rotate_size_mb: 100
+processor_file_prefix: flows_
+
+processor_upload_interval_sec: 600
+processor_timezone: Asia/Shanghai
+
+processor_status_report_enabled: false
+processor_status_report_url: http://127.0.0.1:8080/api/uploadStatus
+processor_status_report_interval_sec: 60
+processor_status_report_uuid:
+processor_status_report_file_path:
+processor_status_report_file_max_mb: 10
+processor_status_report_file_backups: 0
 ```
 
 ### 运行方式

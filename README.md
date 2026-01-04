@@ -20,32 +20,35 @@ pf 是一个一体化的流量采集与处理容器，包含：
 ## 配置
 
 统一使用 `pmacct.conf`（pmacct 配置 + processor 配置）。  
-`processor` 使用 `processor_*` 格式的 `key: value` 行，建议保留注释避免 pmacct 报未知项。
+`processor` 使用 `processor_*` 格式的 `key: value` 行（注释行不会解析）。  
+镜像内默认包含仓库里的 `pmacct.conf`；若运行时挂载同路径文件，会覆盖默认配置。
 
-示例片段（加入到 `pmacct.conf` 末尾即可）：
+示例片段（加入到 `pmacct.conf` 末尾即可，**不要注释**）：
 
 ```conf
-# processor 配置（可注释）
-# processor_ftp_host: 10.0.0.10
-# processor_ftp_port: 21
-# processor_ftp_user: ftpuser
-# processor_ftp_pass: ftppass
-# processor_ftp_dir: /data/areaA
-#
-# processor_rotate_interval_sec: 600
-# processor_rotate_size_mb: 100
-# processor_file_prefix: flows_
-#
-# processor_upload_interval_sec: 600
-# processor_timezone: Asia/Shanghai
-#
-# processor_status_report_enabled: false
-# processor_status_report_url: http://127.0.0.1:8080/api/uploadStatus
-# processor_status_report_interval_sec: 60
-# processor_status_report_uuid:
-# processor_status_report_file_path:
-# processor_status_report_file_max_mb: 10
-# processor_status_report_file_backups: 0
+# processor 配置
+processor_ftp_host: 10.0.0.10
+processor_ftp_port: 21
+processor_ftp_user: ftpuser
+processor_ftp_pass: ftppass
+processor_ftp_dir: /data/areaA
+processor_ftp_timeout: 300
+
+processor_rotate_interval_sec: 600
+processor_rotate_size_mb: 100
+processor_file_prefix: flows_
+
+processor_upload_interval_sec: 600
+processor_timezone: Asia/Shanghai
+processor_debug_print_interval: 0
+
+processor_status_report_enabled: false
+processor_status_report_url: http://127.0.0.1:8080/api/uploadStatus
+processor_status_report_interval_sec: 60
+processor_status_report_uuid:
+processor_status_report_file_path:
+processor_status_report_file_max_mb: 10
+processor_status_report_file_backups: 0
 ```
 
 ## 构建镜像
@@ -59,12 +62,10 @@ docker build -t pf:latest .
 ```bash
 docker run -d --name pf \
   --network host --privileged \
-  -e PCAP_IFACE=eth4 \
   -e PROCESSOR_CONFIG=/etc/pmacct/pmacct.conf \
   -e PROCESSOR_DATA_DIR=/var/lib/processor \
   -v /path/to/pmacct.conf:/etc/pmacct/pmacct.conf:ro \
   -v /path/to/data:/var/lib/processor \
-  -v "$PWD/log:/var/log/pmacct" \
   pf:latest
 ```
 
@@ -82,16 +83,13 @@ docker run -d --name pf \
 
 ## 常用环境变量
 
-- `PCAP_IFACE`：抓包网卡（默认 `eth0`）
-- `NFPROBE_RECEIVER`：IPFIX 接收端（默认 `127.0.0.1:9995`）
-- `ENABLE_EXPORTER`：是否启用 pmacctd（默认 `true`）
-- `ENABLE_COLLECTOR`：是否启用 nfacctd + processor（默认 `true`）
 - `PROCESSOR_CONFIG`：pmacct.conf 路径（默认 `/etc/pmacct/pmacct.conf`）
 - `PROCESSOR_DATA_DIR`：processor 数据目录（默认 `/var/lib/processor`）
 - `PROCESSOR_LOG_LEVEL`：processor 日志级别（默认 `info`）
 
+说明：pmacct 的抓包/导出/采集配置请直接写在 `pmacct.conf` 中。
+
 ## 说明
 
-- 如需只跑 exporter 或 collector，设置 `ENABLE_EXPORTER=false` 或 `ENABLE_COLLECTOR=false`
 - `processor` 仅从 stdin 读取，不会写入 `/var/log/pmacct`
 - 若 `pmacct.conf` 中未配置 `processor_*`，`processor` 会启动失败并退出

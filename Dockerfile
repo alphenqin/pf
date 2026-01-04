@@ -5,15 +5,19 @@
 # - exporter: pmacctd 抓网卡(pcap_interface) -> nfprobe 导出 IPFIX 到 receiver
 # - collector: nfacctd 监听 UDP 9995 -> print(csv) 输出到 stdout，由 processor 接收
 #
+# 特性：
+# - processor采用批量处理优化，支持高吞吐量数据处理
+# - 支持异步文件上传和状态报告
+# - 配置灵活，支持多种部署模式
+#
 # 构建：
 #   docker build -t pf:latest .
 # 多平台：
 #   docker buildx build --platform linux/amd64,linux/arm64 -t pf:latest .
 #
-# 运行（抓 eth4，本机自收自解析；processor 读取 stdout，需挂载 pmacct.conf 与数据目录）：
+# 运行（本机自收自解析；processor 读取 stdout，需挂载 pmacct.conf 与数据目录）：
 #   docker run -d --name pf \
 #     --network host --privileged \
-#     -e PCAP_IFACE=eth4 \
 #     -e PROCESSOR_CONFIG=/etc/pmacct/pmacct.conf \
 #     -e PROCESSOR_DATA_DIR=/var/lib/processor \
 #     -v /path/to/pmacct.conf:/etc/pmacct/pmacct.conf:ro \
@@ -21,11 +25,9 @@
 #     -v "$PWD/log:/var/log/pmacct" \
 #     pf:latest
 #
-# 运行（抓 eth4，导出到远端 192.168.70.185:9995；本容器 collector 仍监听 9995 可选）：
+# 运行（导出到远端 192.168.70.185:9995；本容器 collector 仍监听 9995 可选）：
 #   docker run -d --name pf \
 #     --network host --privileged \
-#     -e PCAP_IFACE=eth4 \
-#     -e NFPROBE_RECEIVER=192.168.70.185:9995 \
 #     -e PROCESSOR_CONFIG=/etc/pmacct/pmacct.conf \
 #     -e PROCESSOR_DATA_DIR=/var/lib/processor \
 #     -v /path/to/pmacct.conf:/etc/pmacct/pmacct.conf:ro \
@@ -33,8 +35,9 @@
 #     -v "$PWD/log:/var/log/pmacct" \
 #     pf:latest
 #
-# 如果你不想在同一个容器里起 collector，可设置：
-#   -e ENABLE_COLLECTOR=false
+#
+# 配置说明：
+# - pmacct 的抓包/导出/采集配置请直接写在 pmacct.conf 中
 # ================================
 
 
@@ -96,9 +99,11 @@ FROM golang:1.21-bookworm AS processor-builder
 
 WORKDIR /src/processor
 
+# 先复制依赖文件以优化构建缓存
 COPY processor/go.mod processor/go.sum ./
 RUN go mod download
 
+# 再复制源代码
 COPY processor/ ./
 ARG TARGETOS TARGETARCH
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} \
@@ -136,160 +141,65 @@ COPY --from=pmacct-builder /usr/local/ /usr/local/
 # processor binary
 COPY --from=processor-builder /out/processor /usr/local/bin/processor
 
-# dirs
+# 创建目录并设置权限，添加错误处理
 RUN set -eux; \
-    mkdir -p /etc/pmacct /var/log/pmacct /var/log/supervisor /var/run/supervisor /opt/pf /var/lib/processor; \
-    chmod 755 /var/run/supervisor
+    mkdir -p /etc/pmacct /var/log/pmacct /var/log/supervisor /var/run/supervisor /opt/pf /var/lib/processor || { echo "Failed to create directories"; exit 1; } && \
+    chmod 755 /var/run/supervisor || { echo "Failed to set directory permissions"; exit 1; } && \
+    # 验证关键目录存在
+    test -d /etc/pmacct && test -d /var/log/pmacct && test -d /var/log/supervisor && test -d /var/run/supervisor && test -d /opt/pf && test -d /var/lib/processor || { echo "Directory verification failed"; exit 1; }
 
-# ================================
-# 单配置文件模板：/etc/pmacct/pmacct.conf
-# 说明：pmacctd 和 nfacctd 都读取同一个文件，各取所需字段
-# ================================
-RUN cat >/etc/pmacct/pmacct.conf.template <<'EOF'
-# ===============================
-# pf single config (pmacctd + nfacctd)
-# ===============================
-daemonize: false
+# 默认配置：使用构建上下文中的 pmacct.conf
+COPY pmacct.conf /etc/pmacct/pmacct.conf
 
-# ---------- exporter (pmacctd + nfprobe) ----------
-pcap_interface: __PCAP_IFACE__
-
-# 五元组 + tos（不要加 timestamp_*，否则会碎）
-aggregate: src_host, dst_host, src_port, dst_port, proto, tos, tcpflags
-
-plugins: nfprobe
-nfprobe_receiver: __NFPROBE_RECEIVER__
-nfprobe_version: __NFPROBE_VERSION__
-nfprobe_timeouts: __NFPROBE_TIMEOUTS__
-
-# ---------- collector (nfacctd + print) ----------
-nfacctd_ip: __NFACCTD_IP__
-nfacctd_port: __NFACCTD_PORT__
-
-print_output: csv
-print_refresh_time: __PRINT_REFRESH_TIME__
-timestamps_since_epoch: true
-
-# 让输出带近似“起止时间”列（timestamp_min/max）
-nfacctd_stitching: true
-
-# 需要更稳性能/大窗口/大 key 数时，调大这个（更吃内存）
-# print_cache_entries: 262144
-
-# ---------- processor（可注释） ----------
-# processor_ftp_host: __PROCESSOR_FTP_HOST__
-# processor_ftp_port: __PROCESSOR_FTP_PORT__
-# processor_ftp_user: __PROCESSOR_FTP_USER__
-# processor_ftp_pass: __PROCESSOR_FTP_PASS__
-# processor_ftp_dir: __PROCESSOR_FTP_DIR__
-#
-# processor_rotate_interval_sec: __PROCESSOR_ROTATE_INTERVAL_SEC__
-# processor_rotate_size_mb: __PROCESSOR_ROTATE_SIZE_MB__
-# processor_file_prefix: __PROCESSOR_FILE_PREFIX__
-#
-# processor_upload_interval_sec: __PROCESSOR_UPLOAD_INTERVAL_SEC__
-# processor_timezone: __PROCESSOR_TIMEZONE__
-#
-# processor_status_report_enabled: __PROCESSOR_STATUS_REPORT_ENABLED__
-# processor_status_report_url: __PROCESSOR_STATUS_REPORT_URL__
-# processor_status_report_interval_sec: __PROCESSOR_STATUS_REPORT_INTERVAL_SEC__
-# processor_status_report_uuid: __PROCESSOR_STATUS_REPORT_UUID__
-# processor_status_report_file_path: __PROCESSOR_STATUS_REPORT_FILE_PATH__
-# processor_status_report_file_max_mb: __PROCESSOR_STATUS_REPORT_FILE_MAX_MB__
-# processor_status_report_file_backups: __PROCESSOR_STATUS_REPORT_FILE_BACKUPS__
-EOF
-
-# 根据 env 渲染 pmacct.conf（如用户挂载了 /etc/pmacct/pmacct.conf 则不覆盖）
+# 使用项目内的 pmacct.conf 作为默认配置（若用户挂载则覆盖）
 RUN cat >/usr/local/bin/render_pmacct_conf.sh <<'EOF'
 #!/usr/bin/env bash
 set -eu
-
 CONF="${PMACCT_CONF:-/etc/pmacct/pmacct.conf}"
-TPL="${PMACCT_CONF_TEMPLATE:-/etc/pmacct/pmacct.conf.template}"
 
 if [ -s "${CONF}" ]; then
   echo "[render] Using existing config: ${CONF}"
   exit 0
 fi
 
-PCAP_IFACE="${PCAP_IFACE:-eth0}"
-NFPROBE_RECEIVER="${NFPROBE_RECEIVER:-127.0.0.1:9995}"
-NFPROBE_VERSION="${NFPROBE_VERSION:-10}"
-NFPROBE_TIMEOUTS="${NFPROBE_TIMEOUTS:-tcp=30:maxlife=60}"
-
-NFACCTD_IP="${NFACCTD_IP:-0.0.0.0}"
-NFACCTD_PORT="${NFACCTD_PORT:-9995}"
-
-PRINT_REFRESH_TIME="${PRINT_REFRESH_TIME:-1}"
-
-PROCESSOR_FTP_HOST="${PROCESSOR_FTP_HOST:-}"
-PROCESSOR_FTP_PORT="${PROCESSOR_FTP_PORT:-21}"
-PROCESSOR_FTP_USER="${PROCESSOR_FTP_USER:-}"
-PROCESSOR_FTP_PASS="${PROCESSOR_FTP_PASS:-}"
-PROCESSOR_FTP_DIR="${PROCESSOR_FTP_DIR:-/}"
-PROCESSOR_ROTATE_INTERVAL_SEC="${PROCESSOR_ROTATE_INTERVAL_SEC:-600}"
-PROCESSOR_ROTATE_SIZE_MB="${PROCESSOR_ROTATE_SIZE_MB:-100}"
-PROCESSOR_FILE_PREFIX="${PROCESSOR_FILE_PREFIX:-flows_}"
-PROCESSOR_UPLOAD_INTERVAL_SEC="${PROCESSOR_UPLOAD_INTERVAL_SEC:-600}"
-PROCESSOR_TIMEZONE="${PROCESSOR_TIMEZONE:-Asia/Shanghai}"
-PROCESSOR_STATUS_REPORT_ENABLED="${PROCESSOR_STATUS_REPORT_ENABLED:-false}"
-PROCESSOR_STATUS_REPORT_URL="${PROCESSOR_STATUS_REPORT_URL:-}"
-PROCESSOR_STATUS_REPORT_INTERVAL_SEC="${PROCESSOR_STATUS_REPORT_INTERVAL_SEC:-60}"
-PROCESSOR_STATUS_REPORT_UUID="${PROCESSOR_STATUS_REPORT_UUID:-}"
-PROCESSOR_STATUS_REPORT_FILE_PATH="${PROCESSOR_STATUS_REPORT_FILE_PATH:-}"
-PROCESSOR_STATUS_REPORT_FILE_MAX_MB="${PROCESSOR_STATUS_REPORT_FILE_MAX_MB:-10}"
-PROCESSOR_STATUS_REPORT_FILE_BACKUPS="${PROCESSOR_STATUS_REPORT_FILE_BACKUPS:-0}"
-
-echo "[render] Generating ${CONF} from template ${TPL}"
-sed \
-  -e "s|__PCAP_IFACE__|${PCAP_IFACE}|g" \
-  -e "s|__NFPROBE_RECEIVER__|${NFPROBE_RECEIVER}|g" \
-  -e "s|__NFPROBE_VERSION__|${NFPROBE_VERSION}|g" \
-  -e "s|__NFPROBE_TIMEOUTS__|${NFPROBE_TIMEOUTS}|g" \
-  -e "s|__NFACCTD_IP__|${NFACCTD_IP}|g" \
-  -e "s|__NFACCTD_PORT__|${NFACCTD_PORT}|g" \
-  -e "s|__PRINT_REFRESH_TIME__|${PRINT_REFRESH_TIME}|g" \
-  -e "s|__PROCESSOR_FTP_HOST__|${PROCESSOR_FTP_HOST}|g" \
-  -e "s|__PROCESSOR_FTP_PORT__|${PROCESSOR_FTP_PORT}|g" \
-  -e "s|__PROCESSOR_FTP_USER__|${PROCESSOR_FTP_USER}|g" \
-  -e "s|__PROCESSOR_FTP_PASS__|${PROCESSOR_FTP_PASS}|g" \
-  -e "s|__PROCESSOR_FTP_DIR__|${PROCESSOR_FTP_DIR}|g" \
-  -e "s|__PROCESSOR_ROTATE_INTERVAL_SEC__|${PROCESSOR_ROTATE_INTERVAL_SEC}|g" \
-  -e "s|__PROCESSOR_ROTATE_SIZE_MB__|${PROCESSOR_ROTATE_SIZE_MB}|g" \
-  -e "s|__PROCESSOR_FILE_PREFIX__|${PROCESSOR_FILE_PREFIX}|g" \
-  -e "s|__PROCESSOR_UPLOAD_INTERVAL_SEC__|${PROCESSOR_UPLOAD_INTERVAL_SEC}|g" \
-  -e "s|__PROCESSOR_TIMEZONE__|${PROCESSOR_TIMEZONE}|g" \
-  -e "s|__PROCESSOR_STATUS_REPORT_ENABLED__|${PROCESSOR_STATUS_REPORT_ENABLED}|g" \
-  -e "s|__PROCESSOR_STATUS_REPORT_URL__|${PROCESSOR_STATUS_REPORT_URL}|g" \
-  -e "s|__PROCESSOR_STATUS_REPORT_INTERVAL_SEC__|${PROCESSOR_STATUS_REPORT_INTERVAL_SEC}|g" \
-  -e "s|__PROCESSOR_STATUS_REPORT_UUID__|${PROCESSOR_STATUS_REPORT_UUID}|g" \
-  -e "s|__PROCESSOR_STATUS_REPORT_FILE_PATH__|${PROCESSOR_STATUS_REPORT_FILE_PATH}|g" \
-  -e "s|__PROCESSOR_STATUS_REPORT_FILE_MAX_MB__|${PROCESSOR_STATUS_REPORT_FILE_MAX_MB}|g" \
-  -e "s|__PROCESSOR_STATUS_REPORT_FILE_BACKUPS__|${PROCESSOR_STATUS_REPORT_FILE_BACKUPS}|g" \
-  "${TPL}" > "${CONF}"
-
-echo "[render] Done. Preview:"
-head -n 120 "${CONF}"
+echo "[render] ERROR: Config not found: ${CONF}"
+exit 1
 EOF
 
 # exporter 启动脚本
 RUN cat >/usr/local/bin/start_exporter.sh <<'EOF'
 #!/usr/bin/env bash
 set -eu
-/usr/local/bin/render_pmacct_conf.sh
+echo "[exporter] Starting pmacctd exporter..."
+
+# 渲染配置文件
+if ! /usr/local/bin/render_pmacct_conf.sh; then
+    echo "[exporter] Failed to render pmacct config"
+    exit 1
+fi
+
 CONF="${PMACCT_CONF:-/etc/pmacct/pmacct.conf}"
 RUNTIME_DIR="/var/run/pmacct"
 FILTERED_CONF="${RUNTIME_DIR}/pmacctd.conf"
-mkdir -p "${RUNTIME_DIR}"
+
+# 创建运行时目录
+if ! mkdir -p "${RUNTIME_DIR}"; then
+    echo "[exporter] Failed to create runtime directory: ${RUNTIME_DIR}"
+    exit 1
+fi
 
 # 过滤掉 processor_* 配置，避免 pmacctd 报未知项
-awk '
+if ! awk '
   /^[[:space:]]*processor_/ {next}
   /^[[:space:]]*#[[:space:]]*processor_/ {next}
   {print}
-' "${CONF}" > "${FILTERED_CONF}"
+' "${CONF}" > "${FILTERED_CONF}"; then
+    echo "[exporter] Failed to filter config file"
+    exit 1
+fi
 
-echo "[exporter] conf=${FILTERED_CONF}"
+echo "[exporter] Using config: ${FILTERED_CONF}"
+echo "[exporter] Starting pmacctd..."
 exec /usr/local/sbin/pmacctd -f "${FILTERED_CONF}"
 EOF
 
@@ -297,7 +207,14 @@ EOF
 RUN cat >/usr/local/bin/start_collector.sh <<'EOF'
 #!/usr/bin/env bash
 set -eu
-/usr/local/bin/render_pmacct_conf.sh
+echo "[collector] Starting nfacctd collector with processor..."
+
+# 渲染配置文件
+if ! /usr/local/bin/render_pmacct_conf.sh; then
+    echo "[collector] Failed to render pmacct config"
+    exit 1
+fi
+
 CONF="${PMACCT_CONF:-/etc/pmacct/pmacct.conf}"
 RUNTIME_DIR="/var/run/pmacct"
 FILTERED_CONF="${RUNTIME_DIR}/nfacctd.conf"
@@ -306,15 +223,23 @@ PROCESSOR_CONFIG="${PROCESSOR_CONFIG:-/etc/pmacct/pmacct.conf}"
 PROCESSOR_DATA_DIR="${PROCESSOR_DATA_DIR:-/var/lib/processor}"
 PROCESSOR_LOG_LEVEL="${PROCESSOR_LOG_LEVEL:-info}"
 
+# 检查processor二进制文件
 if [ ! -x "${PROCESSOR_BIN}" ]; then
-  echo "[collector] processor not found or not executable: ${PROCESSOR_BIN}"
+  echo "[collector] ERROR: processor not found or not executable: ${PROCESSOR_BIN}"
   exit 1
 fi
-mkdir -p "${RUNTIME_DIR}" "${PROCESSOR_DATA_DIR}"
-echo "[collector] conf=${CONF}"
+
+# 创建必要的目录
+if ! mkdir -p "${RUNTIME_DIR}" "${PROCESSOR_DATA_DIR}"; then
+    echo "[collector] ERROR: Failed to create directories"
+    exit 1
+fi
+
+echo "[collector] Using config: ${CONF}"
+echo "[collector] Processor binary: ${PROCESSOR_BIN}"
 
 # nfacctd 不支持 nfprobe 插件；过滤 processor_* 与 nfprobe_*，并强制 plugins: print
-awk '
+if ! awk '
   BEGIN {plugins_set=0}
   /^[[:space:]]*plugins:/ {print "plugins: print"; plugins_set=1; next}
   /^[[:space:]]*nfprobe_/ {next}
@@ -322,33 +247,39 @@ awk '
   /^[[:space:]]*#[[:space:]]*processor_/ {next}
   {print}
   END {if (!plugins_set) print "plugins: print"}
-' "${CONF}" > "${FILTERED_CONF}"
+' "${CONF}" > "${FILTERED_CONF}"; then
+    echo "[collector] ERROR: Failed to filter config file"
+    exit 1
+fi
 
-echo "[collector] nfacctd_conf=${FILTERED_CONF}"
-echo "[collector] processor=${PROCESSOR_BIN}"
-echo "[collector] processor_config=${PROCESSOR_CONFIG}"
-echo "[collector] processor_data_dir=${PROCESSOR_DATA_DIR}"
-echo "[collector] processor_log_level=${PROCESSOR_LOG_LEVEL}"
+echo "[collector] Filtered config: ${FILTERED_CONF}"
+echo "[collector] Processor config: ${PROCESSOR_CONFIG}"
+echo "[collector] Processor data dir: ${PROCESSOR_DATA_DIR}"
+echo "[collector] Processor log level: ${PROCESSOR_LOG_LEVEL}"
+
+# 启动nfacctd并将其输出管道到processor
+echo "[collector] Starting nfacctd and processor pipeline..."
 set -o pipefail
-/usr/local/sbin/nfacctd -f "${FILTERED_CONF}" | \
-  "${PROCESSOR_BIN}" -config "${PROCESSOR_CONFIG}" -data-dir "${PROCESSOR_DATA_DIR}" -log-level "${PROCESSOR_LOG_LEVEL}"
+if ! /usr/local/sbin/nfacctd -f "${FILTERED_CONF}" | \
+  "${PROCESSOR_BIN}" -config "${PROCESSOR_CONFIG}" -data-dir "${PROCESSOR_DATA_DIR}" -log-level "${PROCESSOR_LOG_LEVEL}"; then
+    echo "[collector] ERROR: Pipeline failed"
+    exit 1
+fi
 EOF
 
-RUN sed -i 's/\r$//' /usr/local/bin/render_pmacct_conf.sh /usr/local/bin/start_exporter.sh /usr/local/bin/start_collector.sh && \
+# 设置脚本权限
+RUN set -eux; \
+    sed -i 's/\r$//' /usr/local/bin/render_pmacct_conf.sh /usr/local/bin/start_exporter.sh /usr/local/bin/start_collector.sh && \
     chmod +x /usr/local/bin/render_pmacct_conf.sh /usr/local/bin/start_exporter.sh /usr/local/bin/start_collector.sh
 
 # ================================
 # supervisor：默认同时起 exporter + collector
-# 通过环境变量 ENABLE_COLLECTOR / ENABLE_EXPORTER 控制启停
 # ================================
 RUN cat >/usr/local/bin/supervisor_entry.sh <<'EOF'
 #!/usr/bin/env bash
 set -eu
 
-ENABLE_EXPORTER="${ENABLE_EXPORTER:-true}"
-ENABLE_COLLECTOR="${ENABLE_COLLECTOR:-true}"
-
-# 动态生成 supervisord 程序段，方便按 env 开关
+# 生成 supervisord 配置
 cat >/etc/supervisor/supervisord.conf <<'CONF'
 [unix_http_server]
 file=/var/run/supervisor/supervisor.sock
@@ -356,11 +287,14 @@ chmod=0700
 
 [supervisord]
 nodaemon=true
-logfile=/dev/stdout
-logfile_maxbytes=0
-logfile_backups=0
+logfile=/var/log/supervisor/supervisord.log
+logfile_maxbytes=50MB
+logfile_backups=10
+loglevel=info
 pidfile=/var/run/supervisor/supervisord.pid
 user=root
+minfds=1024
+minprocs=200
 
 [rpcinterface:supervisor]
 supervisor.rpcinterface_factory = supervisor.rpcinterface:make_main_rpcinterface
@@ -369,8 +303,7 @@ supervisor.rpcinterface_factory = supervisor.rpcinterface:make_main_rpcinterface
 serverurl=unix:///var/run/supervisor/supervisor.sock
 CONF
 
-if [ "${ENABLE_COLLECTOR}" = "true" ]; then
-  cat >>/etc/supervisor/supervisord.conf <<'CONF'
+cat >>/etc/supervisor/supervisord.conf <<'CONF'
 
 [program:collector]
 command=/bin/bash /usr/local/bin/start_collector.sh
@@ -378,19 +311,18 @@ autorestart=true
 startsecs=2
 startretries=10
 priority=100
-stdout_logfile=/var/log/supervisor/collector.log
-stdout_logfile_maxbytes=20MB
-stdout_logfile_backups=5
+stdout_logfile=/dev/stdout
+stdout_logfile_maxbytes=0
+stdout_logfile_backups=0
 stderr_logfile=/dev/stdout
 stderr_logfile_maxbytes=0
 stderr_logfile_backups=0
+redirect_stderr=false
+stopsignal=TERM
+stopwaitsecs=30
 CONF
-else
-  echo "[entry] collector disabled"
-fi
 
-if [ "${ENABLE_EXPORTER}" = "true" ]; then
-  cat >>/etc/supervisor/supervisord.conf <<'CONF'
+cat >>/etc/supervisor/supervisord.conf <<'CONF'
 
 [program:exporter]
 command=/bin/bash /usr/local/bin/start_exporter.sh
@@ -398,21 +330,24 @@ autorestart=true
 startsecs=2
 startretries=10
 priority=200
-stdout_logfile=/var/log/supervisor/exporter.log
-stdout_logfile_maxbytes=20MB
-stdout_logfile_backups=5
+stdout_logfile=/dev/stdout
+stdout_logfile_maxbytes=0
+stdout_logfile_backups=0
 stderr_logfile=/dev/stdout
 stderr_logfile_maxbytes=0
 stderr_logfile_backups=0
+redirect_stderr=false
+stopsignal=TERM
+stopwaitsecs=30
 CONF
-else
-  echo "[entry] exporter disabled"
-fi
 
 exec /usr/bin/supervisord -c /etc/supervisor/supervisord.conf
 EOF
 
-RUN sed -i 's/\r$//' /usr/local/bin/supervisor_entry.sh && chmod +x /usr/local/bin/supervisor_entry.sh
+# 设置supervisor_entry.sh脚本权限
+RUN set -eux; \
+    sed -i 's/\r$//' /usr/local/bin/supervisor_entry.sh && \
+    chmod +x /usr/local/bin/supervisor_entry.sh
 
 WORKDIR /opt/pf
 ENTRYPOINT ["/usr/local/bin/supervisor_entry.sh"]

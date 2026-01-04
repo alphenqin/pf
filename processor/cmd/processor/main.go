@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/pmacct/processor/internal/config"
-	"github.com/pmacct/processor/internal/converter"
 	"github.com/pmacct/processor/internal/statusreport"
 	"github.com/pmacct/processor/internal/uploader"
 	"github.com/pmacct/processor/internal/batchwriter"
@@ -78,6 +77,7 @@ func main() {
 		cfg.FTPUser,
 		cfg.FTPPass,
 		cfg.FTPDir,
+		cfg.FTPOptions.TimeoutSec,
 		*dataDir,
 		cfg.UploadIntervalSec,
 	)
@@ -102,7 +102,7 @@ func main() {
 	// 启动从 stdin 读取的 goroutine
 	ingestDone := make(chan error, 1)
 	go func() {
-		ingestDone <- runIngest(ctx, dataChan, cfg.Timezone, reporter)
+		ingestDone <- runIngest(ctx, dataChan, reporter, cfg.DebugPrintInterval)
 	}()
 
 	// 等待信号或完成
@@ -152,6 +152,23 @@ func parseCounts(line string, pktIdx, byteIdx int) (int64, int64) {
 	return pkts, bytes
 }
 
+// isHeaderLine 判断是否为表头行（用于丢弃表头）
+func isHeaderLine(line string) bool {
+	lower := strings.ToLower(line)
+	headerKeywords := []string{
+		"flowstart", "timestamp",
+		"src_ip", "dst_ip", "src_host", "dst_host",
+		"src_port", "dst_port", "protocol", "proto", "tos",
+		"packet", "octet", "bytes",
+	}
+	for _, kw := range headerKeywords {
+		if strings.Contains(lower, kw) {
+			return true
+		}
+	}
+	return false
+}
+
 // min 返回两个整数中的较小值
 func min(a, b int) int {
 	if a < b {
@@ -161,10 +178,9 @@ func min(a, b int) int {
 }
 
 // runIngest 从标准输入读取数据并放入channel
-func runIngest(ctx context.Context, dataChan chan<- model.DataLine, timezone string, reporter *statusreport.Reporter) error {
+func runIngest(ctx context.Context, dataChan chan<- model.DataLine, reporter *statusreport.Reporter, debugPrintInterval int) error {
 	scanner := bufio.NewScanner(os.Stdin)
 	lineCount := 0
-	var timeConverter *converter.TimeConverter
 	headerProcessed := false
 	packetIdx := -1
 	octetIdx := -1
@@ -176,6 +192,7 @@ func runIngest(ctx context.Context, dataChan chan<- model.DataLine, timezone str
 		default:
 			if !scanner.Scan() {
 				if err := scanner.Err(); err != nil {
+					log.Printf("[ERROR] 读取 stdin 失败: %v", err)
 					return fmt.Errorf("读取 stdin 失败: %w", err)
 				}
 				// EOF
@@ -188,19 +205,11 @@ func runIngest(ctx context.Context, dataChan chan<- model.DataLine, timezone str
 				continue
 			}
 
-			// 处理表头行：初始化时间转换器
+			// 处理表头行：解析字段索引（表头行会被丢弃）
 			if !headerProcessed {
-				// 检查是否是表头行（包含 flowStartMilliseconds）
-				if strings.Contains(line, "flowStartMilliseconds") {
-					var err error
-					timeConverter, err = converter.NewTimeConverter(line, timezone)
-					if err != nil {
-						log.Printf("[WARN] 初始化时间转换器失败: %v，将不进行时区转换", err)
-						timeConverter = nil
-					} else {
-						log.Printf("[INFO] 时间转换器已初始化，目标时区: %s", timezone)
-					}
-					headerProcessed = true
+			// 检查是否是表头行
+			if isHeaderLine(line) {
+				headerProcessed = true
 
 					// 解析字段索引（包/字节统计）
 					fields := strings.Split(line, "|")
@@ -213,33 +222,23 @@ func runIngest(ctx context.Context, dataChan chan<- model.DataLine, timezone str
 							octetIdx = i
 						}
 					}
-				}
-				// 表头行直接放入channel
-				select {
-				case dataChan <- model.DataLine{Line: line, IsHeader: true}:
-				case <-ctx.Done():
-					return ctx.Err()
-				}
 				continue
 			}
-
-			// 处理数据行：转换时间字段
-			outputLine := line
-			if timeConverter != nil && timeConverter.IsInitialized() {
-				converted, err := timeConverter.ConvertLine(line)
-				if err != nil {
-					// 转换失败，使用原行
-					log.Printf("[WARN] 转换时间失败: %v，使用原始数据", err)
-				} else {
-					outputLine = converted
-				}
 			}
+
+			// 处理数据行
+			outputLine := line
 
 			// 统计包/字节数
 			if reporter != nil && packetIdx >= 0 && octetIdx >= 0 {
 				if pkts, bytes := parseCounts(outputLine, packetIdx, octetIdx); pkts > 0 || bytes > 0 {
 					reporter.Add(pkts, bytes)
 				}
+			}
+
+			// 每隔指定行数打印CSV数据行内容用于调试
+			if debugPrintInterval > 0 && lineCount > 0 && lineCount%debugPrintInterval == 0 {
+				log.Printf("[DEBUG] CSV数据行 #%d: %s", lineCount, outputLine)
 			}
 
 			// 将数据行放入channel，带超时保护

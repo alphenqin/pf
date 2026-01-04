@@ -20,6 +20,7 @@ type Uploader struct {
 	ftpUser           string
 	ftpPass           string
 	ftpDir            string
+	ftpTimeoutSec     int // FTP操作超时时间（秒）
 	dataDir           string
 	uploadIntervalSec int
 	stopChan          chan struct{}
@@ -27,7 +28,7 @@ type Uploader struct {
 }
 
 // NewUploader 创建新的 Uploader
-func NewUploader(ctx context.Context, ftpHost string, ftpPort int, ftpUser, ftpPass, ftpDir, dataDir string, uploadIntervalSec int) *Uploader {
+func NewUploader(ctx context.Context, ftpHost string, ftpPort int, ftpUser, ftpPass, ftpDir string, ftpTimeoutSec int, dataDir string, uploadIntervalSec int) *Uploader {
 	return &Uploader{
 		ctx:               ctx,
 		ftpHost:           ftpHost,
@@ -35,6 +36,7 @@ func NewUploader(ctx context.Context, ftpHost string, ftpPort int, ftpUser, ftpP
 		ftpUser:           ftpUser,
 		ftpPass:           ftpPass,
 		ftpDir:            ftpDir,
+		ftpTimeoutSec:     ftpTimeoutSec,
 		dataDir:           dataDir,
 		uploadIntervalSec: uploadIntervalSec,
 		stopChan:          make(chan struct{}),
@@ -160,7 +162,7 @@ func (u *Uploader) uploadFile(localPath, filename string) error {
 
 	// 连接 FTP 服务器
 	addr := fmt.Sprintf("%s:%d", u.ftpHost, u.ftpPort)
-	conn, err := ftp.Dial(addr, ftp.DialWithTimeout(30*time.Second))
+	conn, err := ftp.Dial(addr, ftp.DialWithTimeout(time.Duration(u.ftpTimeoutSec)*time.Second))
 	if err != nil {
 		return fmt.Errorf("连接 FTP 服务器失败: %w", err)
 	}
@@ -256,7 +258,7 @@ func (u *Uploader) cleanupRemoteTempFiles() error {
 	}
 
 	addr := fmt.Sprintf("%s:%d", u.ftpHost, u.ftpPort)
-	conn, err := ftp.Dial(addr, ftp.DialWithTimeout(30*time.Second))
+	conn, err := ftp.Dial(addr, ftp.DialWithTimeout(time.Duration(u.ftpTimeoutSec)*time.Second))
 	if err != nil {
 		return fmt.Errorf("连接 FTP 服务器失败: %w", err)
 	}
