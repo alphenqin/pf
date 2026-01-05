@@ -65,23 +65,8 @@ RUN set -eux; \
 WORKDIR /tmp
 
 RUN set -eux; \
-    url_https="https://www.pmacct.net/pmacct-${PMACCT_VERSION}.tar.gz"; \
-    url_http="http://www.pmacct.net/pmacct-${PMACCT_VERSION}.tar.gz"; \
-    ok=0; \
-    for url in "$url_https" "$url_http"; do \
-      for i in 1 2 3 4 5; do \
-        curl -fSL --retry 3 --retry-delay 2 --retry-connrefused --retry-all-errors \
-          -C - "$url" -o pmacct.tar.gz || true; \
-        if tar tzf pmacct.tar.gz >/dev/null 2>&1; then \
-          ok=1; \
-          break; \
-        fi; \
-        rm -f pmacct.tar.gz; \
-        sleep 2; \
-      done; \
-      if [ "$ok" = "1" ]; then break; fi; \
-    done; \
-    test "$ok" = "1"; \
+    url="https://sourceforge.net/projects/pmacct.mirror/files/v1.7.9/pmacct-${PMACCT_VERSION}.tar.gz/download"; \
+    curl -fL --retry 5 --retry-delay 2 --retry-all-errors -o pmacct.tar.gz "$url"; \
     tar xzf pmacct.tar.gz; \
     cd "pmacct-${PMACCT_VERSION}"; \
     ./configure --prefix=/usr/local; \
