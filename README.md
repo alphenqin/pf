@@ -53,8 +53,26 @@ processor_status_report_file_backups: 0
 
 ## 构建镜像
 
+默认使用预编译的 pmacct 包（`pmacct-usrlocal-amd64.tar` / `pmacct-usrlocal-arm64.tar`），
+不编译源码，速度更快。需要源码编译时再用参数开启。
+
 ```bash
 docker build -t pf:latest .
+```
+
+多平台（推荐，自动按架构选预编译包）：
+
+```bash
+docker buildx build --platform linux/amd64,linux/arm64 -t pf:latest .
+```
+
+如需源码编译（耗时较长）：
+
+```bash
+docker buildx build \
+  --build-arg PMACCT_MODE=source \
+  --build-arg PMACCT_VERSION=1.7.9 \
+  -t pf:latest .
 ```
 
 ## 运行（推荐）

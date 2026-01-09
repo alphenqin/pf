@@ -42,42 +42,6 @@
 
 
 # ================================
-# 1) build: 编译 pmacct（含 pmacctd / nfacctd / nfprobe / print）
-# ================================
-FROM debian:bookworm-slim AS pmacct-builder
-
-ENV DEBIAN_FRONTEND=noninteractive
-ARG PMACCT_VERSION=1.7.9
-
-RUN set -eux; \
-    rm -f /etc/apt/sources.list.d/debian.sources || true; \
-    echo "deb http://mirrors.aliyun.com/debian bookworm main contrib non-free non-free-firmware" > /etc/apt/sources.list; \
-    echo "deb http://mirrors.aliyun.com/debian bookworm-updates main contrib non-free non-free-firmware" >> /etc/apt/sources.list; \
-    echo "deb http://mirrors.aliyun.com/debian-security bookworm-security main contrib non-free non-free-firmware" >> /etc/apt/sources.list; \
-    apt-get update; \
-    apt-get install -y --no-install-recommends \
-      ca-certificates curl \
-      build-essential g++ \
-      libpcap-dev \
-      pkg-config libtool autoconf automake make bash; \
-    rm -rf /var/lib/apt/lists/*
-
-WORKDIR /tmp
-
-RUN set -eux; \
-    url="https://sourceforge.net/projects/pmacct.mirror/files/v1.7.9/pmacct-${PMACCT_VERSION}.tar.gz/download"; \
-    curl -fL --retry 5 --retry-delay 2 --retry-all-errors -o pmacct.tar.gz "$url"; \
-    tar xzf pmacct.tar.gz; \
-    cd "pmacct-${PMACCT_VERSION}"; \
-    ./configure --prefix=/usr/local; \
-    make -j"$(nproc)"; \
-    make install; \
-    ldconfig; \
-    cd /tmp; \
-    rm -rf "pmacct-${PMACCT_VERSION}" pmacct.tar.gz
-
-
-# ================================
 # 2) build: 编译 processor
 # ================================
 FROM golang:1.21-bookworm AS processor-builder
@@ -115,14 +79,45 @@ RUN set -eux; \
     apt-get install -y --no-install-recommends \
       ca-certificates \
       libpcap0.8 \
-      bash procps tcpdump netcat-traditional iproute2 net-tools dnsutils psmisc vim-tiny less \
+      bash procps tcpdump netcat-traditional iproute2 net-tools dnsutils psmisc vim less ftp \
       supervisor tzdata; \
     ln -fs /usr/share/zoneinfo/Asia/Shanghai /etc/localtime; \
     echo "Asia/Shanghai" > /etc/timezone; dpkg-reconfigure -f noninteractive tzdata; \
     rm -rf /var/lib/apt/lists/*
 
-# pmacct binaries + libs
-COPY --from=pmacct-builder /usr/local/ /usr/local/
+# pmacct binaries + libs (default: prebuilt tar; optional: build from source)
+ARG PMACCT_MODE=prebuilt
+ARG PMACCT_VERSION=1.7.9
+ARG TARGETARCH
+COPY pmacct-usrlocal-${TARGETARCH}.tar /tmp/pmacct.tar
+RUN set -eux; \
+    if [ "${PMACCT_MODE}" = "source" ]; then \
+      apt-get update; \
+      apt-get install -y --no-install-recommends \
+        ca-certificates curl \
+        build-essential g++ \
+        libpcap-dev \
+        pkg-config libtool autoconf automake make bash; \
+      rm -rf /var/lib/apt/lists/*; \
+      cd /tmp; \
+      url="https://sourceforge.net/projects/pmacct.mirror/files/v1.7.9/pmacct-${PMACCT_VERSION}.tar.gz/download"; \
+      curl -fL --retry 5 --retry-delay 2 --retry-all-errors -o pmacct.tar.gz "$url"; \
+      tar xzf pmacct.tar.gz; \
+      cd "pmacct-${PMACCT_VERSION}"; \
+      ./configure --prefix=/usr/local; \
+      make -j"$(nproc)"; \
+      make install; \
+      ldconfig; \
+      cd /tmp; \
+      rm -rf "pmacct-${PMACCT_VERSION}" pmacct.tar.gz; \
+      apt-get purge -y --auto-remove \
+        build-essential g++ libpcap-dev pkg-config libtool autoconf automake make; \
+      rm -rf /var/lib/apt/lists/*; \
+    else \
+      tar -xf /tmp/pmacct.tar -C /tmp; \
+      cp -a "/tmp/pmacct-usrlocal-${TARGETARCH}/." /usr/local/; \
+      rm -rf "/tmp/pmacct-usrlocal-${TARGETARCH}" /tmp/pmacct.tar; \
+    fi
 # processor binary
 COPY --from=processor-builder /out/processor /usr/local/bin/processor
 
