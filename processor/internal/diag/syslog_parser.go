@@ -2,7 +2,6 @@ package diag
 
 import (
 	"bufio"
-	"compress/gzip"
 	"fmt"
 	"os"
 	"regexp"
@@ -37,13 +36,7 @@ func parseSyslogFile(path string, defaultHost string) ([]syslogEntry, error) {
 	}
 	defer f.Close()
 
-	gr, err := gzip.NewReader(f)
-	if err != nil {
-		return nil, err
-	}
-	defer gr.Close()
-
-	scanner := bufio.NewScanner(gr)
+	scanner := bufio.NewScanner(f)
 	buf := make([]byte, 0, 64*1024)
 	scanner.Buffer(buf, 1024*1024)
 

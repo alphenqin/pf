@@ -28,7 +28,6 @@ type Collector struct {
 const (
 	diagHostLogDir = "/var/lib/processor/log"
 	diagProcLogDir = "/var/log/pmacct"
-	diagOutSubDir  = "diag"
 )
 
 func NewCollector(ctx context.Context, cfg config.DiagConfig, dataDir string) *Collector {
@@ -74,29 +73,35 @@ func (c *Collector) run() {
 }
 
 func (c *Collector) collectOnce() {
-	outDir := filepath.Join(c.dataDir, diagOutSubDir)
-	tmpDir := filepath.Join(outDir, "tmp")
-	if err := os.MkdirAll(tmpDir, 0755); err != nil {
+	outDir := c.dataDir
+	stateDir := filepath.Join(c.dataDir, "diag")
+	if err := os.MkdirAll(outDir, 0755); err != nil {
 		log.Printf("[WARN] diag: 创建目录失败: %v", err)
+		return
+	}
+	if err := os.MkdirAll(stateDir, 0755); err != nil {
+		log.Printf("[WARN] diag: 创建状态目录失败: %v", err)
 		return
 	}
 
 	ts := time.Now().UTC().Format("20060102T150405Z")
-	diagOut := filepath.Join(outDir, fmt.Sprintf("diag_%s_%s_v1.json.gz", c.host, ts))
+	diagOut := filepath.Join(outDir, fmt.Sprintf("diag_%s_%s.json.gz", c.host, ts))
 
-	syslogEntries, syslogChanged := c.collectSyslogEntries(outDir)
-	procEntries, procChanged := c.collectProcEntries(outDir)
-	envData, envChanged, envAvailable := c.readEnvData(outDir)
+	syslogEntries, _ := c.collectSyslogEntries(stateDir)
+	procMetrics, _ := c.collectProcMetrics(stateDir)
+	envData, _, envAvailable, envPath := c.readEnvData(stateDir)
 
-	shouldWrite := syslogChanged || procChanged || envChanged
-	if !shouldWrite {
+	if len(syslogEntries) == 0 && len(procMetrics) == 0 && !envAvailable {
 		return
 	}
-	if err := writeDiagJSON(diagOut, syslogEntries, procEntries, envData, envAvailable); err != nil {
+	if err := writeDiagJSON(diagOut, syslogEntries, procMetrics, envData, envAvailable); err != nil {
 		log.Printf("[WARN] diag: 写入诊断文件失败: %v", err)
 		return
 	}
-	log.Printf("[INFO] diag: 已生成诊断文件: %s (syslog=%d, proc=%d)", filepath.Base(diagOut), len(syslogEntries), len(procEntries))
+	if err := cleanupDiagSources(stateDir, envPath); err != nil {
+		log.Printf("[WARN] diag: 清理源文件失败: %v", err)
+	}
+	log.Printf("[INFO] diag: 已生成诊断文件: %s (syslog=%d, proc=%d)", filepath.Base(diagOut), len(syslogEntries), len(procMetrics))
 }
 
 func (c *Collector) collectSyslogEntries(outDir string) ([]syslogEntry, bool) {
@@ -113,7 +118,7 @@ func (c *Collector) collectSyslogEntries(outDir string) ([]syslogEntry, bool) {
 			continue
 		}
 		name := entry.Name()
-		if strings.HasPrefix(name, "syslog_") && strings.HasSuffix(name, ".log.gz") {
+		if strings.HasPrefix(name, "syslog_") && strings.HasSuffix(name, ".log") {
 			targets = append(targets, filepath.Join(diagHostLogDir, name))
 		}
 	}
@@ -145,10 +150,10 @@ func (c *Collector) collectSyslogEntries(outDir string) ([]syslogEntry, bool) {
 	return all, changed
 }
 
-func (c *Collector) readEnvData(outDir string) (map[string]interface{}, bool, bool) {
+func (c *Collector) readEnvData(outDir string) (map[string]interface{}, bool, bool, string) {
 	envPath, envFound := findLatestEnvFile(diagHostLogDir)
 	if !envFound {
-		return nil, false, false
+		return nil, false, false, ""
 	}
 	envStatePath := filepath.Join(outDir, "env_latest.state")
 	lastEnv := readStringFile(envStatePath)
@@ -157,7 +162,7 @@ func (c *Collector) readEnvData(outDir string) (map[string]interface{}, bool, bo
 	data, err := readFirstJSONLine(envPath)
 	if err != nil {
 		log.Printf("[WARN] diag: 读取环境信息失败: %s -> %v", envPath, err)
-		return nil, false, true
+		return nil, false, true, envPath
 	}
 	data["src"] = "env"
 	if _, ok := data["host"]; !ok {
@@ -166,51 +171,24 @@ func (c *Collector) readEnvData(outDir string) (map[string]interface{}, bool, bo
 	if envChanged {
 		_ = os.WriteFile(envStatePath, []byte(envPath), 0644)
 	}
-	return data, envChanged, true
+	return data, envChanged, true, envPath
 }
 
-func (c *Collector) collectProcEntries(outDir string) ([]procEntry, bool) {
-	offsetPath := filepath.Join(outDir, "proc_offsets.json")
-	offsets := loadProcOffsets(offsetPath)
-
-	entries, err := os.ReadDir(diagProcLogDir)
-	if err != nil {
+func (c *Collector) collectProcMetrics(outDir string) ([]procMetric, bool) {
+	statePath := filepath.Join(outDir, "proc_metrics.state.json")
+	prev := loadProcMetricState(statePath)
+	metrics, next := collectProcMetricsSnapshot(prev)
+	if err := saveProcMetricState(statePath, next); err != nil {
+		log.Printf("[WARN] diag: 保存进程状态失败: %v", err)
+	}
+	if len(metrics) == 0 {
 		return nil, false
 	}
-	var files []string
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		name := entry.Name()
-		if strings.HasSuffix(name, ".log") || strings.HasSuffix(name, ".err.log") {
-			files = append(files, filepath.Join(diagProcLogDir, name))
-		}
+	for i := range metrics {
+		metrics[i].Host = c.host
+		metrics[i].Src = "proc"
 	}
-	sort.Strings(files)
-
-	changed := false
-	var all []procEntry
-	for _, path := range files {
-		procEntries, newOffset, inode, err := parseProcFile(path, c.host, offsets[path])
-		if err != nil {
-			log.Printf("[WARN] diag: 解析进程日志失败: %s -> %v", path, err)
-			continue
-		}
-		if len(procEntries) > 0 {
-			all = append(all, procEntries...)
-			changed = true
-		}
-		if inode != 0 {
-			offsets[path] = procOffsetState{Inode: inode, Offset: newOffset}
-		}
-	}
-	if changed {
-		if err := saveProcOffsets(offsetPath, offsets); err != nil {
-			log.Printf("[WARN] diag: 保存进程日志状态失败: %v", err)
-		}
-	}
-	return all, changed
+	return metrics, true
 }
 
 func readFirstJSONLine(path string) (map[string]interface{}, error) {
@@ -220,13 +198,7 @@ func readFirstJSONLine(path string) (map[string]interface{}, error) {
 	}
 	defer f.Close()
 
-	gr, err := gzip.NewReader(f)
-	if err != nil {
-		return nil, err
-	}
-	defer gr.Close()
-
-	buf, err := io.ReadAll(gr)
+	buf, err := io.ReadAll(f)
 	if err != nil {
 		return nil, err
 	}
@@ -262,7 +234,7 @@ type diagEntry struct {
 	idx int
 }
 
-func writeDiagJSON(path string, syslogEntries []syslogEntry, procEntries []procEntry, envData map[string]interface{}, envAvailable bool) error {
+func writeDiagJSON(path string, syslogEntries []syslogEntry, procMetrics []procMetric, envData map[string]interface{}, envAvailable bool) error {
 	var entries []diagEntry
 	idx := 0
 	for _, e := range syslogEntries {
@@ -288,20 +260,15 @@ func writeDiagJSON(path string, syslogEntries []syslogEntry, procEntries []procE
 		entries = append(entries, diagEntry{ts: ts, raw: raw, idx: idx})
 		idx++
 	}
-	for _, e := range procEntries {
+	for _, e := range procMetrics {
 		ts := parseEntryTime(e.TS)
 		rec := diagRecord{
-			TS:    e.TS,
-			Host:  e.Host,
-			Src:   e.Src,
-			Level: e.Level,
-			Msg:   e.Msg,
-			Payload: map[string]interface{}{
-				"app":  e.App,
-				"tag":  e.Tag,
-				"file": e.File,
-				"raw":  e.Raw,
-			},
+			TS:      e.TS,
+			Host:    e.Host,
+			Src:     e.Src,
+			Level:   e.Level,
+			Msg:     e.Msg,
+			Payload: e.Payload,
 		}
 		raw, err := json.Marshal(rec)
 		if err != nil {
@@ -372,6 +339,25 @@ func parseEntryTime(value string) time.Time {
 	return time.Time{}
 }
 
+func cleanupDiagSources(stateDir string, envPath string) error {
+	processedPath := filepath.Join(stateDir, "syslog_processed.list")
+	envStatePath := filepath.Join(stateDir, "env_latest.state")
+
+	processed := loadStringSet(processedPath)
+	for path := range processed {
+		if path == "" {
+			continue
+		}
+		_ = os.Remove(path)
+	}
+	_ = os.WriteFile(processedPath, []byte{}, 0644)
+	_ = os.Remove(envStatePath)
+	if envPath != "" {
+		_ = os.Remove(envPath)
+	}
+	return nil
+}
+
 type diagRecord struct {
 	TS      string                 `json:"ts"`
 	Host    string                 `json:"host"`
@@ -415,7 +401,7 @@ func findLatestEnvFile(dir string) (string, bool) {
 			continue
 		}
 		name := entry.Name()
-		if strings.HasPrefix(name, "env_") && strings.HasSuffix(name, ".json.gz") {
+		if strings.HasPrefix(name, "env_") && strings.HasSuffix(name, ".json") {
 			files = append(files, filepath.Join(dir, name))
 		}
 	}

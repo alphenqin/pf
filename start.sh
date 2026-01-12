@@ -32,7 +32,7 @@ if [ -n "${SYSLOG_FILE}" ]; then
   fi
   NEW_BYTES=$((CUR_SIZE - PREV_OFFSET))
   if [ "${NEW_BYTES}" -gt 0 ]; then
-    tail -c +"$((PREV_OFFSET + 1))" "${SYSLOG_FILE}" | gzip > "${OUT_DIR}/syslog_${HOST}_${TS}_v1.log.gz"
+    tail -c +"$((PREV_OFFSET + 1))" "${SYSLOG_FILE}" > "${OUT_DIR}/syslog_${HOST}_${TS}.log"
     printf '%s %s\n' "${CUR_INODE}" "${CUR_SIZE}" > "${STATE_FILE}"
   fi
 fi
@@ -79,6 +79,6 @@ if [ -s "${ENV_HASH_FILE}" ]; then
   PREV_ENV_HASH="$(cat "${ENV_HASH_FILE}")"
 fi
 if [ "${ENV_HASH}" != "${PREV_ENV_HASH}" ]; then
-  printf '%s' "${ENV_JSON}" | gzip > "${OUT_DIR}/env_${HOST}_${TS}_v1.json.gz"
+  printf '%s' "${ENV_JSON}" > "${OUT_DIR}/env_${HOST}_${TS}.json"
   printf '%s\n' "${ENV_HASH}" > "${ENV_HASH_FILE}"
 fi

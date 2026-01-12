@@ -40,24 +40,32 @@ func readStringFile(path string) string {
 	return strings.TrimSpace(string(data))
 }
 
-type procOffsetState struct {
-	Inode  uint64 `json:"inode"`
-	Offset int64  `json:"offset"`
+type procMetricState struct {
+	TotalJiffies uint64         `json:"total_jiffies"`
+	ProcTicks    map[int]uint64 `json:"proc_ticks"`
+	ProcName     map[int]string `json:"proc_name,omitempty"`
+	SampleTime   int64          `json:"sample_time,omitempty"`
 }
 
-func loadProcOffsets(path string) map[string]procOffsetState {
+func loadProcMetricState(path string) procMetricState {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return map[string]procOffsetState{}
+		return procMetricState{ProcTicks: map[int]uint64{}, ProcName: map[int]string{}}
 	}
-	var res map[string]procOffsetState
+	var res procMetricState
 	if err := json.Unmarshal(data, &res); err != nil {
-		return map[string]procOffsetState{}
+		return procMetricState{ProcTicks: map[int]uint64{}, ProcName: map[int]string{}}
+	}
+	if res.ProcTicks == nil {
+		res.ProcTicks = map[int]uint64{}
+	}
+	if res.ProcName == nil {
+		res.ProcName = map[int]string{}
 	}
 	return res
 }
 
-func saveProcOffsets(path string, data map[string]procOffsetState) error {
+func saveProcMetricState(path string, data procMetricState) error {
 	blob, err := json.Marshal(data)
 	if err != nil {
 		return err

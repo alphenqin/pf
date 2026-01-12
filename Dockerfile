@@ -151,6 +151,7 @@ EOF
 RUN cat >/usr/local/bin/start_exporter.sh <<'EOF'
 #!/usr/bin/env bash
 set -eu
+umask 022
 echo "[exporter] Starting pmacctd exporter..."
 
 # 渲染配置文件
@@ -183,13 +184,14 @@ fi
 
 echo "[exporter] Using config: ${FILTERED_CONF}"
 echo "[exporter] Starting pmacctd..."
-exec /usr/local/sbin/pmacctd -f "${FILTERED_CONF}" >>"${LOG_FILE}" 2>&1
+exec /usr/local/sbin/pmacctd -f "${FILTERED_CONF}" 2>&1 | tee -a "${LOG_FILE}"
 EOF
 
 # collector 启动脚本（输出到 stdout，由 processor 接收）
 RUN cat >/usr/local/bin/start_collector.sh <<'EOF'
 #!/usr/bin/env bash
 set -eu
+umask 022
 echo "[collector] Starting nfacctd collector with processor..."
 
 # 渲染配置文件
@@ -246,8 +248,10 @@ echo "[collector] Processor log level: ${PROCESSOR_LOG_LEVEL}"
 # 启动nfacctd并将其输出管道到processor
 echo "[collector] Starting nfacctd and processor pipeline..."
 set -o pipefail
-if ! /usr/local/sbin/nfacctd -f "${FILTERED_CONF}" 2>>"${NFACCTD_LOG}" | \
-  "${PROCESSOR_BIN}" -config "${PROCESSOR_CONFIG}" -data-dir "${PROCESSOR_DATA_DIR}" -log-level "${PROCESSOR_LOG_LEVEL}" 2>>"${PROCESSOR_LOG}"; then
+if ! /usr/local/sbin/nfacctd -f "${FILTERED_CONF}" \
+  2> >(tee -a "${NFACCTD_LOG}" >&2) | \
+  "${PROCESSOR_BIN}" -config "${PROCESSOR_CONFIG}" -data-dir "${PROCESSOR_DATA_DIR}" -log-level "${PROCESSOR_LOG_LEVEL}" \
+  2> >(tee -a "${PROCESSOR_LOG}" >&2); then
     echo "[collector] ERROR: Pipeline failed"
     exit 1
 fi

@@ -15,7 +15,7 @@ pf 是一个一体化的流量采集与处理容器，包含：
 
 - 本地数据目录：生成滚动的 `*.csv.gz` 文件（写入中为 `.part`）
 - FTP：按 `processor_*` 配置上传到目标目录
-- 日志：容器 stdout/stderr（含 pmacct 与 processor 输出）
+- 日志：容器 stdout/stderr（含 pmacct 与 processor 输出），同时落盘到 `/var/log/pmacct/*.log`
 
 ## 配置
 
@@ -50,7 +50,7 @@ processor_status_report_file_path:
 processor_status_report_file_max_mb: 10
 processor_status_report_file_backups: 0
 
-# 诊断采集（宿主机日志 + 容器进程日志）
+# 诊断采集（宿主机日志 + 容器进程资源指标）
 processor_diag_enabled: false
 processor_diag_interval_sec: 600
 ```
@@ -58,17 +58,16 @@ processor_diag_interval_sec: 600
 ## 诊断采集说明
 
 - 宿主机脚本产出：
-  - `syslog_*.log.gz`（原始系统日志增量片段）
-  - `env_*.json.gz`（环境信息快照）
+  - `syslog_*.log`（原始系统日志增量片段）
+  - `env_*.json`（环境信息快照）
 - 容器内读取固定路径：
   - 宿主机日志：`/var/lib/processor/log`
-  - 进程日志：`/var/log/pmacct`
-  - 输出子目录：`/var/lib/processor/diag`
-  生成结构化合并文件：
-  - `diag_<host>_<ts>_v1.json.gz`（JSON Lines，按时间排序）
+  - 输出目录：`/var/lib/processor`（与 CSV 同级）
+  并在容器内采集以下进程资源指标（CPU/内存/IO）：`pmacctd / nfacctd / processor`，当系统日志 + 环境信息 + 进程指标齐全时生成结构化合并文件：
+  - `diag_<host>_<ts>.json.gz`（JSON Lines，按时间排序）
   - 统一字段格式：`ts, host, src, level, msg, payload`
-  - `payload` 存放各类型特有字段
-- 日志文件输出到数据目录子目录 `diag`，并上传至 FTP 的二级目录 `processor_ftp_dir/diag`
+  - `payload` 存放各类型特有字段（包含 CPU/内存/IO 等）
+- 日志文件输出到数据目录根目录，并上传至 FTP 的 `processor_ftp_dir`；打包成功后会清理已处理的宿主机日志与环境文件
 
 ## 从容器拷出宿主机采集脚本
 
@@ -82,7 +81,13 @@ chmod +x /mnt/d/projects/pf/start.sh
 宿主机运行示例：
 
 ```bash
-PF_DATA_DIR=/path/to/data /mnt/d/projects/pf/start.sh
+PF_DATA_DIR=/mnt/d/projects/pf/data /mnt/d/projects/pf/start.sh
+```
+
+定时运行示例（每 5 分钟）：
+
+```bash
+*/5 * * * * PF_DATA_DIR=/mnt/d/projects/pf/data /mnt/d/projects/pf/start.sh >/dev/null 2>&1
 ```
 
 ## 构建镜像
@@ -129,7 +134,7 @@ docker run -d --name pf \
 docker run -d --name pf \
   --network host --privileged \
   -v /mnt/d/projects/pf/pmacct.conf:/etc/pmacct/pmacct.conf:ro \
-  -v /path/to/data:/var/lib/processor \
+  -v /mnt/d/projects/pf/data:/var/lib/processor \
   pf:latest
 ```
 
@@ -143,5 +148,5 @@ docker run -d --name pf \
 
 ## 说明
 
-- `processor` 仅从 stdin 读取，不会写入 `/var/log/pmacct`
+- `pmacctd/nfacctd/processor` 日志会写入 `/var/log/pmacct/*.log`
 - 若 `pmacct.conf` 中未配置 `processor_*`，`processor` 会启动失败并退出

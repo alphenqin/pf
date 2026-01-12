@@ -27,8 +27,6 @@ type Uploader struct {
 	doneChan          chan struct{}
 }
 
-const diagSubDir = "diag"
-
 // NewUploader 创建新的 Uploader
 func NewUploader(ctx context.Context, ftpHost string, ftpPort int, ftpUser, ftpPass, ftpDir string, ftpTimeoutSec int, dataDir string, uploadIntervalSec int) *Uploader {
 	return &Uploader{
@@ -112,15 +110,14 @@ func (u *Uploader) scanAndUpload() {
 		}
 	}
 
-	logDir := filepath.Join(u.dataDir, diagSubDir)
-	logEntries, err := os.ReadDir(logDir)
+	logEntries, err := os.ReadDir(u.dataDir)
 	if err == nil {
 		for _, entry := range logEntries {
 			if entry.IsDir() {
 				continue
 			}
 			if strings.HasSuffix(entry.Name(), ".json.gz") {
-				filesToUpload = append(filesToUpload, filepath.Join(diagSubDir, entry.Name()))
+				filesToUpload = append(filesToUpload, entry.Name())
 			}
 		}
 	}
@@ -293,7 +290,7 @@ func (u *Uploader) cleanupRemoteTempFiles() error {
 	}
 
 	cleaned := 0
-	paths := []string{u.ftpDir, joinRemoteDir(u.ftpDir, diagSubDir)}
+	paths := []string{u.ftpDir}
 	for _, dir := range paths {
 		if err := u.ensureRemoteDir(conn, dir); err != nil {
 			return fmt.Errorf("创建远程目录失败: %w", err)
@@ -377,23 +374,5 @@ func (u *Uploader) ensureRemoteDir(conn *ftp.ServerConn, dir string) error {
 }
 
 func (u *Uploader) resolveRemotePath(filename string) (string, string) {
-	prefix := diagSubDir + string(os.PathSeparator)
-	if strings.HasPrefix(filename, prefix) {
-		remoteBase := joinRemoteDir(u.ftpDir, diagSubDir)
-		remoteName := strings.TrimPrefix(filename, prefix)
-		return remoteBase, remoteName
-	}
 	return u.ftpDir, filename
-}
-
-func joinRemoteDir(base, sub string) string {
-	base = strings.TrimRight(base, "/")
-	sub = strings.TrimLeft(sub, "/")
-	if base == "" {
-		return "/" + sub
-	}
-	if sub == "" {
-		return base
-	}
-	return base + "/" + sub
 }
