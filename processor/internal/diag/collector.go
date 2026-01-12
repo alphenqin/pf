@@ -25,6 +25,12 @@ type Collector struct {
 	host     string
 }
 
+const (
+	diagHostLogDir = "/var/lib/processor/log"
+	diagProcLogDir = "/var/log/pmacct"
+	diagOutSubDir  = "diag"
+)
+
 func NewCollector(ctx context.Context, cfg config.DiagConfig, dataDir string) *Collector {
 	host, _ := os.Hostname()
 	if host == "" {
@@ -68,7 +74,7 @@ func (c *Collector) run() {
 }
 
 func (c *Collector) collectOnce() {
-	outDir := filepath.Join(c.dataDir, c.cfg.OutSubDir)
+	outDir := filepath.Join(c.dataDir, diagOutSubDir)
 	tmpDir := filepath.Join(outDir, "tmp")
 	if err := os.MkdirAll(tmpDir, 0755); err != nil {
 		log.Printf("[WARN] diag: 创建目录失败: %v", err)
@@ -97,7 +103,7 @@ func (c *Collector) collectSyslogEntries(outDir string) ([]syslogEntry, bool) {
 	processedPath := filepath.Join(outDir, "syslog_processed.list")
 	processed := loadStringSet(processedPath)
 
-	files, err := os.ReadDir(c.cfg.HostLogDir)
+	files, err := os.ReadDir(diagHostLogDir)
 	if err != nil {
 		return nil, false
 	}
@@ -108,7 +114,7 @@ func (c *Collector) collectSyslogEntries(outDir string) ([]syslogEntry, bool) {
 		}
 		name := entry.Name()
 		if strings.HasPrefix(name, "syslog_") && strings.HasSuffix(name, ".log.gz") {
-			targets = append(targets, filepath.Join(c.cfg.HostLogDir, name))
+			targets = append(targets, filepath.Join(diagHostLogDir, name))
 		}
 	}
 	sort.Strings(targets)
@@ -140,7 +146,7 @@ func (c *Collector) collectSyslogEntries(outDir string) ([]syslogEntry, bool) {
 }
 
 func (c *Collector) readEnvData(outDir string) (map[string]interface{}, bool, bool) {
-	envPath, envFound := findLatestEnvFile(c.cfg.HostLogDir)
+	envPath, envFound := findLatestEnvFile(diagHostLogDir)
 	if !envFound {
 		return nil, false, false
 	}
@@ -167,7 +173,7 @@ func (c *Collector) collectProcEntries(outDir string) ([]procEntry, bool) {
 	offsetPath := filepath.Join(outDir, "proc_offsets.json")
 	offsets := loadProcOffsets(offsetPath)
 
-	entries, err := os.ReadDir(c.cfg.ProcLogDir)
+	entries, err := os.ReadDir(diagProcLogDir)
 	if err != nil {
 		return nil, false
 	}
@@ -178,7 +184,7 @@ func (c *Collector) collectProcEntries(outDir string) ([]procEntry, bool) {
 		}
 		name := entry.Name()
 		if strings.HasSuffix(name, ".log") || strings.HasSuffix(name, ".err.log") {
-			files = append(files, filepath.Join(c.cfg.ProcLogDir, name))
+			files = append(files, filepath.Join(diagProcLogDir, name))
 		}
 	}
 	sort.Strings(files)

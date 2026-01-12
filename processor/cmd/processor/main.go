@@ -78,7 +78,6 @@ func main() {
 		cfg.FTPUser,
 		cfg.FTPPass,
 		cfg.FTPDir,
-		cfg.Diag.OutSubDir,
 		cfg.FTPOptions.TimeoutSec,
 		*dataDir,
 		cfg.UploadIntervalSec,

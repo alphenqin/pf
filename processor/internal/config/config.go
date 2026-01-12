@@ -37,9 +37,6 @@ type FTPOptions struct {
 // DiagConfig 诊断采集配置（宿主机日志 + 容器进程日志）
 type DiagConfig struct {
 	Enabled     bool
-	HostLogDir  string
-	ProcLogDir  string
-	OutSubDir   string
 	IntervalSec int
 }
 
@@ -138,9 +135,6 @@ func LoadConfig(configPath string) (*ProcessorConfig, error) {
 	cfg.StatusReport.URL = kv[processorPrefix+"status_report_url"]
 	cfg.StatusReport.UUID = kv[processorPrefix+"status_report_uuid"]
 	cfg.StatusReport.FilePath = kv[processorPrefix+"status_report_file_path"]
-	cfg.Diag.HostLogDir = kv[processorPrefix+"diag_host_log_dir"]
-	cfg.Diag.ProcLogDir = kv[processorPrefix+"diag_proc_log_dir"]
-	cfg.Diag.OutSubDir = kv[processorPrefix+"diag_out_subdir"]
 
 	if v, ok := kv[processorPrefix+"ftp_port"]; ok {
 		if num, err := strconv.Atoi(v); err != nil {
@@ -271,15 +265,6 @@ func validateConfig(cfg *ProcessorConfig) error {
 	// 设置FTP选项默认值
 	if cfg.FTPOptions.TimeoutSec <= 0 {
 		cfg.FTPOptions.TimeoutSec = 60 // 默认60秒超时
-	}
-	if cfg.Diag.OutSubDir == "" {
-		cfg.Diag.OutSubDir = "diag"
-	}
-	if cfg.Diag.HostLogDir == "" {
-		cfg.Diag.HostLogDir = "/var/lib/processor/log"
-	}
-	if cfg.Diag.ProcLogDir == "" {
-		cfg.Diag.ProcLogDir = "/var/log/pmacct"
 	}
 	if cfg.Diag.IntervalSec <= 0 {
 		cfg.Diag.IntervalSec = cfg.UploadIntervalSec

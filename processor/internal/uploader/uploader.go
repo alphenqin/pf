@@ -20,7 +20,6 @@ type Uploader struct {
 	ftpUser           string
 	ftpPass           string
 	ftpDir            string
-	logSubDir         string
 	ftpTimeoutSec     int // FTP操作超时时间（秒）
 	dataDir           string
 	uploadIntervalSec int
@@ -28,8 +27,10 @@ type Uploader struct {
 	doneChan          chan struct{}
 }
 
+const diagSubDir = "diag"
+
 // NewUploader 创建新的 Uploader
-func NewUploader(ctx context.Context, ftpHost string, ftpPort int, ftpUser, ftpPass, ftpDir, logSubDir string, ftpTimeoutSec int, dataDir string, uploadIntervalSec int) *Uploader {
+func NewUploader(ctx context.Context, ftpHost string, ftpPort int, ftpUser, ftpPass, ftpDir string, ftpTimeoutSec int, dataDir string, uploadIntervalSec int) *Uploader {
 	return &Uploader{
 		ctx:               ctx,
 		ftpHost:           ftpHost,
@@ -37,7 +38,6 @@ func NewUploader(ctx context.Context, ftpHost string, ftpPort int, ftpUser, ftpP
 		ftpUser:           ftpUser,
 		ftpPass:           ftpPass,
 		ftpDir:            ftpDir,
-		logSubDir:         logSubDir,
 		ftpTimeoutSec:     ftpTimeoutSec,
 		dataDir:           dataDir,
 		uploadIntervalSec: uploadIntervalSec,
@@ -112,17 +112,15 @@ func (u *Uploader) scanAndUpload() {
 		}
 	}
 
-	if u.logSubDir != "" {
-		logDir := filepath.Join(u.dataDir, u.logSubDir)
-		logEntries, err := os.ReadDir(logDir)
-		if err == nil {
-			for _, entry := range logEntries {
-				if entry.IsDir() {
-					continue
-				}
-				if strings.HasSuffix(entry.Name(), ".json.gz") {
-					filesToUpload = append(filesToUpload, filepath.Join(u.logSubDir, entry.Name()))
-				}
+	logDir := filepath.Join(u.dataDir, diagSubDir)
+	logEntries, err := os.ReadDir(logDir)
+	if err == nil {
+		for _, entry := range logEntries {
+			if entry.IsDir() {
+				continue
+			}
+			if strings.HasSuffix(entry.Name(), ".json.gz") {
+				filesToUpload = append(filesToUpload, filepath.Join(diagSubDir, entry.Name()))
 			}
 		}
 	}
@@ -295,10 +293,7 @@ func (u *Uploader) cleanupRemoteTempFiles() error {
 	}
 
 	cleaned := 0
-	paths := []string{u.ftpDir}
-	if u.logSubDir != "" {
-		paths = append(paths, joinRemoteDir(u.ftpDir, u.logSubDir))
-	}
+	paths := []string{u.ftpDir, joinRemoteDir(u.ftpDir, diagSubDir)}
 	for _, dir := range paths {
 		if err := u.ensureRemoteDir(conn, dir); err != nil {
 			return fmt.Errorf("创建远程目录失败: %w", err)
@@ -382,9 +377,9 @@ func (u *Uploader) ensureRemoteDir(conn *ftp.ServerConn, dir string) error {
 }
 
 func (u *Uploader) resolveRemotePath(filename string) (string, string) {
-	prefix := u.logSubDir + string(os.PathSeparator)
-	if u.logSubDir != "" && strings.HasPrefix(filename, prefix) {
-		remoteBase := joinRemoteDir(u.ftpDir, u.logSubDir)
+	prefix := diagSubDir + string(os.PathSeparator)
+	if strings.HasPrefix(filename, prefix) {
+		remoteBase := joinRemoteDir(u.ftpDir, diagSubDir)
 		remoteName := strings.TrimPrefix(filename, prefix)
 		return remoteBase, remoteName
 	}
