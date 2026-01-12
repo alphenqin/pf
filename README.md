@@ -49,6 +49,39 @@ processor_status_report_uuid:
 processor_status_report_file_path:
 processor_status_report_file_max_mb: 10
 processor_status_report_file_backups: 0
+
+# 诊断采集（宿主机日志 + 容器进程日志）
+processor_diag_enabled: false
+processor_diag_host_log_dir: /var/lib/processor/log
+processor_diag_proc_log_dir: /var/log/pmacct
+processor_diag_out_subdir: diag
+processor_diag_interval_sec: 600
+```
+
+## 诊断采集说明
+
+- 宿主机脚本产出：
+  - `syslog_*.log.gz`（原始系统日志增量片段）
+  - `env_*.json.gz`（环境信息快照）
+- 容器内读取 `processor_diag_host_log_dir` 与 `processor_diag_proc_log_dir`，生成结构化合并文件：
+  - `diag_<host>_<ts>_v1.json.gz`（JSON Lines，按时间排序）
+  - 统一字段格式：`ts, host, src, level, msg, payload`
+  - `payload` 存放各类型特有字段
+- 日志文件输出到数据目录子目录 `processor_diag_out_subdir`，并上传至 FTP 的二级目录 `processor_ftp_dir/<processor_diag_out_subdir>`
+
+## 从容器拷出宿主机采集脚本
+
+镜像内内置 `/usr/local/bin/start.sh`，可拷出到宿主机执行：
+
+```bash
+docker cp <container>:/usr/local/bin/start.sh /mnt/d/projects/pf/start.sh
+chmod +x /mnt/d/projects/pf/start.sh
+```
+
+宿主机运行示例：
+
+```bash
+PF_DATA_DIR=/path/to/data /mnt/d/projects/pf/start.sh
 ```
 
 ## 构建镜像

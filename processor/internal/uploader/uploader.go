@@ -20,6 +20,7 @@ type Uploader struct {
 	ftpUser           string
 	ftpPass           string
 	ftpDir            string
+	logSubDir         string
 	ftpTimeoutSec     int // FTP操作超时时间（秒）
 	dataDir           string
 	uploadIntervalSec int
@@ -28,7 +29,7 @@ type Uploader struct {
 }
 
 // NewUploader 创建新的 Uploader
-func NewUploader(ctx context.Context, ftpHost string, ftpPort int, ftpUser, ftpPass, ftpDir string, ftpTimeoutSec int, dataDir string, uploadIntervalSec int) *Uploader {
+func NewUploader(ctx context.Context, ftpHost string, ftpPort int, ftpUser, ftpPass, ftpDir, logSubDir string, ftpTimeoutSec int, dataDir string, uploadIntervalSec int) *Uploader {
 	return &Uploader{
 		ctx:               ctx,
 		ftpHost:           ftpHost,
@@ -36,6 +37,7 @@ func NewUploader(ctx context.Context, ftpHost string, ftpPort int, ftpUser, ftpP
 		ftpUser:           ftpUser,
 		ftpPass:           ftpPass,
 		ftpDir:            ftpDir,
+		logSubDir:         logSubDir,
 		ftpTimeoutSec:     ftpTimeoutSec,
 		dataDir:           dataDir,
 		uploadIntervalSec: uploadIntervalSec,
@@ -102,8 +104,26 @@ func (u *Uploader) scanAndUpload() {
 
 	var filesToUpload []string
 	for _, entry := range entries {
-		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".csv.gz") {
+		if entry.IsDir() {
+			continue
+		}
+		if strings.HasSuffix(entry.Name(), ".csv.gz") {
 			filesToUpload = append(filesToUpload, entry.Name())
+		}
+	}
+
+	if u.logSubDir != "" {
+		logDir := filepath.Join(u.dataDir, u.logSubDir)
+		logEntries, err := os.ReadDir(logDir)
+		if err == nil {
+			for _, entry := range logEntries {
+				if entry.IsDir() {
+					continue
+				}
+				if strings.HasSuffix(entry.Name(), ".json.gz") {
+					filesToUpload = append(filesToUpload, filepath.Join(u.logSubDir, entry.Name()))
+				}
+			}
 		}
 	}
 
@@ -177,20 +197,22 @@ func (u *Uploader) uploadFile(localPath, filename string) error {
 		return fmt.Errorf("FTP 登录失败: %w", err)
 	}
 
+	remoteBaseDir, remoteFilename := u.resolveRemotePath(filename)
+
 	// 确保远程目录存在
-	if err := u.ensureRemoteDir(conn, u.ftpDir); err != nil {
+	if err := u.ensureRemoteDir(conn, remoteBaseDir); err != nil {
 		return fmt.Errorf("创建远程目录失败: %w", err)
 	}
 
 	// 构建远程文件路径（最终文件 + 临时文件）
-	remotePath := u.ftpDir + "/" + filename
-	if strings.HasSuffix(u.ftpDir, "/") {
-		remotePath = u.ftpDir + filename
+	remotePath := remoteBaseDir + "/" + remoteFilename
+	if strings.HasSuffix(remoteBaseDir, "/") {
+		remotePath = remoteBaseDir + remoteFilename
 	}
-	tempName := filename + ".tmp"
-	remoteTempPath := u.ftpDir + "/" + tempName
-	if strings.HasSuffix(u.ftpDir, "/") {
-		remoteTempPath = u.ftpDir + tempName
+	tempName := remoteFilename + ".tmp"
+	remoteTempPath := remoteBaseDir + "/" + tempName
+	if strings.HasSuffix(remoteBaseDir, "/") {
+		remoteTempPath = remoteBaseDir + tempName
 	}
 
 	// 检查 FTP 服务器上是否已存在最终文件（避免重复上传）
@@ -272,36 +294,39 @@ func (u *Uploader) cleanupRemoteTempFiles() error {
 		return fmt.Errorf("FTP 登录失败: %w", err)
 	}
 
-	if err := u.ensureRemoteDir(conn, u.ftpDir); err != nil {
-		return fmt.Errorf("创建远程目录失败: %w", err)
-	}
-
-	entries, err := conn.List(u.ftpDir)
-	if err != nil {
-		return fmt.Errorf("列出远端目录失败: %w", err)
-	}
-
 	cleaned := 0
-	for _, entry := range entries {
-		if entry.Type != ftp.EntryTypeFile {
-			continue
-		}
-		name := entry.Name
-		if !strings.HasSuffix(name, ".tmp") {
-			continue
-		}
-		remotePath := u.ftpDir + "/" + name
-		if strings.HasSuffix(u.ftpDir, "/") {
-			remotePath = u.ftpDir + name
-		}
-		if err := conn.Delete(remotePath); err != nil {
-			log.Printf("[WARN] 删除远端临时文件失败: %s -> %v", remotePath, err)
-			continue
-		}
-		cleaned++
-		log.Printf("[INFO] 已清理远端临时文件: %s", remotePath)
+	paths := []string{u.ftpDir}
+	if u.logSubDir != "" {
+		paths = append(paths, joinRemoteDir(u.ftpDir, u.logSubDir))
 	}
-
+	for _, dir := range paths {
+		if err := u.ensureRemoteDir(conn, dir); err != nil {
+			return fmt.Errorf("创建远程目录失败: %w", err)
+		}
+		entries, err := conn.List(dir)
+		if err != nil {
+			return fmt.Errorf("列出远端目录失败: %w", err)
+		}
+		for _, entry := range entries {
+			if entry.Type != ftp.EntryTypeFile {
+				continue
+			}
+			name := entry.Name
+			if !strings.HasSuffix(name, ".tmp") {
+				continue
+			}
+			remotePath := dir + "/" + name
+			if strings.HasSuffix(dir, "/") {
+				remotePath = dir + name
+			}
+			if err := conn.Delete(remotePath); err != nil {
+				log.Printf("[WARN] 删除远端临时文件失败: %s -> %v", remotePath, err)
+				continue
+			}
+			cleaned++
+			log.Printf("[INFO] 已清理远端临时文件: %s", remotePath)
+		}
+	}
 	if cleaned > 0 {
 		log.Printf("[INFO] 远端临时文件清理完成: %d", cleaned)
 	}
@@ -354,4 +379,26 @@ func (u *Uploader) ensureRemoteDir(conn *ftp.ServerConn, dir string) error {
 		}
 	}
 	return nil
+}
+
+func (u *Uploader) resolveRemotePath(filename string) (string, string) {
+	prefix := u.logSubDir + string(os.PathSeparator)
+	if u.logSubDir != "" && strings.HasPrefix(filename, prefix) {
+		remoteBase := joinRemoteDir(u.ftpDir, u.logSubDir)
+		remoteName := strings.TrimPrefix(filename, prefix)
+		return remoteBase, remoteName
+	}
+	return u.ftpDir, filename
+}
+
+func joinRemoteDir(base, sub string) string {
+	base = strings.TrimRight(base, "/")
+	sub = strings.TrimLeft(sub, "/")
+	if base == "" {
+		return "/" + sub
+	}
+	if sub == "" {
+		return base
+	}
+	return base + "/" + sub
 }

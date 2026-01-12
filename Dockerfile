@@ -120,6 +120,7 @@ RUN set -eux; \
     fi
 # processor binary
 COPY --from=processor-builder /out/processor /usr/local/bin/processor
+COPY start.sh /usr/local/bin/start.sh
 
 # 创建目录并设置权限，添加错误处理
 RUN set -eux; \
@@ -161,9 +162,11 @@ fi
 CONF="${PMACCT_CONF:-/etc/pmacct/pmacct.conf}"
 RUNTIME_DIR="/var/run/pmacct"
 FILTERED_CONF="${RUNTIME_DIR}/pmacctd.conf"
+LOG_DIR="/var/log/pmacct"
+LOG_FILE="${LOG_DIR}/pmacctd.log"
 
 # 创建运行时目录
-if ! mkdir -p "${RUNTIME_DIR}"; then
+if ! mkdir -p "${RUNTIME_DIR}" "${LOG_DIR}"; then
     echo "[exporter] Failed to create runtime directory: ${RUNTIME_DIR}"
     exit 1
 fi
@@ -180,7 +183,7 @@ fi
 
 echo "[exporter] Using config: ${FILTERED_CONF}"
 echo "[exporter] Starting pmacctd..."
-exec /usr/local/sbin/pmacctd -f "${FILTERED_CONF}"
+exec /usr/local/sbin/pmacctd -f "${FILTERED_CONF}" >>"${LOG_FILE}" 2>&1
 EOF
 
 # collector 启动脚本（输出到 stdout，由 processor 接收）
@@ -202,6 +205,9 @@ PROCESSOR_BIN="${PROCESSOR_BIN:-/usr/local/bin/processor}"
 PROCESSOR_CONFIG="${PROCESSOR_CONFIG:-/etc/pmacct/pmacct.conf}"
 PROCESSOR_DATA_DIR="${PROCESSOR_DATA_DIR:-/var/lib/processor}"
 PROCESSOR_LOG_LEVEL="${PROCESSOR_LOG_LEVEL:-info}"
+LOG_DIR="/var/log/pmacct"
+NFACCTD_LOG="${LOG_DIR}/nfacctd.log"
+PROCESSOR_LOG="${LOG_DIR}/processor.log"
 
 # 检查processor二进制文件
 if [ ! -x "${PROCESSOR_BIN}" ]; then
@@ -210,7 +216,7 @@ if [ ! -x "${PROCESSOR_BIN}" ]; then
 fi
 
 # 创建必要的目录
-if ! mkdir -p "${RUNTIME_DIR}" "${PROCESSOR_DATA_DIR}"; then
+if ! mkdir -p "${RUNTIME_DIR}" "${PROCESSOR_DATA_DIR}" "${LOG_DIR}"; then
     echo "[collector] ERROR: Failed to create directories"
     exit 1
 fi
@@ -240,8 +246,8 @@ echo "[collector] Processor log level: ${PROCESSOR_LOG_LEVEL}"
 # 启动nfacctd并将其输出管道到processor
 echo "[collector] Starting nfacctd and processor pipeline..."
 set -o pipefail
-if ! /usr/local/sbin/nfacctd -f "${FILTERED_CONF}" | \
-  "${PROCESSOR_BIN}" -config "${PROCESSOR_CONFIG}" -data-dir "${PROCESSOR_DATA_DIR}" -log-level "${PROCESSOR_LOG_LEVEL}"; then
+if ! /usr/local/sbin/nfacctd -f "${FILTERED_CONF}" 2>>"${NFACCTD_LOG}" | \
+  "${PROCESSOR_BIN}" -config "${PROCESSOR_CONFIG}" -data-dir "${PROCESSOR_DATA_DIR}" -log-level "${PROCESSOR_LOG_LEVEL}" 2>>"${PROCESSOR_LOG}"; then
     echo "[collector] ERROR: Pipeline failed"
     exit 1
 fi
@@ -249,8 +255,8 @@ EOF
 
 # 设置脚本权限
 RUN set -eux; \
-    sed -i 's/\r$//' /usr/local/bin/render_pmacct_conf.sh /usr/local/bin/start_exporter.sh /usr/local/bin/start_collector.sh && \
-    chmod +x /usr/local/bin/render_pmacct_conf.sh /usr/local/bin/start_exporter.sh /usr/local/bin/start_collector.sh
+    sed -i 's/\r$//' /usr/local/bin/render_pmacct_conf.sh /usr/local/bin/start_exporter.sh /usr/local/bin/start_collector.sh /usr/local/bin/start.sh && \
+    chmod +x /usr/local/bin/render_pmacct_conf.sh /usr/local/bin/start_exporter.sh /usr/local/bin/start_collector.sh /usr/local/bin/start.sh
 
 # ================================
 # supervisor：默认同时起 exporter + collector

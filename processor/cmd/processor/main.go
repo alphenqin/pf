@@ -13,11 +13,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/pmacct/processor/internal/batchwriter"
 	"github.com/pmacct/processor/internal/config"
+	"github.com/pmacct/processor/internal/diag"
+	"github.com/pmacct/processor/internal/model"
 	"github.com/pmacct/processor/internal/statusreport"
 	"github.com/pmacct/processor/internal/uploader"
-	"github.com/pmacct/processor/internal/batchwriter"
-	"github.com/pmacct/processor/internal/model"
 )
 
 var (
@@ -77,6 +78,7 @@ func main() {
 		cfg.FTPUser,
 		cfg.FTPPass,
 		cfg.FTPDir,
+		cfg.Diag.OutSubDir,
 		cfg.FTPOptions.TimeoutSec,
 		*dataDir,
 		cfg.UploadIntervalSec,
@@ -85,6 +87,14 @@ func main() {
 	// 启动上传器
 	up.Start()
 	log.Printf("[INFO] FTP 上传器已启动，上传间隔: %ds", cfg.UploadIntervalSec)
+
+	// 启动诊断采集（宿主机日志结构化 + 进程日志）
+	var diagCollector *diag.Collector
+	if cfg.Diag.Enabled {
+		diagCollector = diag.NewCollector(ctx, cfg.Diag, *dataDir)
+		diagCollector.Start()
+		log.Printf("[INFO] 诊断采集已启用，间隔: %ds", cfg.Diag.IntervalSec)
+	}
 
 	// 创建数据通道（带缓冲）
 	dataChan := make(chan model.DataLine, 10000)
@@ -135,11 +145,13 @@ func main() {
 		log.Printf("[INFO] Batch writer 已关闭")
 	}
 
+	if diagCollector != nil {
+		diagCollector.Stop()
+	}
 	// 停止上传器
 	up.Stop()
 	log.Printf("[INFO] 程序退出")
 }
-
 
 // parseCounts 从行中按索引解析包/字节数
 func parseCounts(line string, pktIdx, byteIdx int) (int64, int64) {
@@ -207,9 +219,9 @@ func runIngest(ctx context.Context, dataChan chan<- model.DataLine, reporter *st
 
 			// 处理表头行：解析字段索引（表头行会被丢弃）
 			if !headerProcessed {
-			// 检查是否是表头行
-			if isHeaderLine(line) {
-				headerProcessed = true
+				// 检查是否是表头行
+				if isHeaderLine(line) {
+					headerProcessed = true
 
 					// 解析字段索引（包/字节统计）
 					fields := strings.Split(line, "|")
@@ -222,8 +234,8 @@ func runIngest(ctx context.Context, dataChan chan<- model.DataLine, reporter *st
 							octetIdx = i
 						}
 					}
-				continue
-			}
+					continue
+				}
 			}
 
 			// 处理数据行
