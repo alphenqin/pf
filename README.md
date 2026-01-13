@@ -60,6 +60,7 @@ processor_diag_interval_sec: 600
 - 宿主机脚本产出：
   - `syslog_*.log`（原始系统日志增量片段）
   - `env_*.json`（环境信息快照）
+    - 字段：`ts, host, os, kernel, uptime_sec, load1, load5, load15, cpu_cores, mem_total_kb, mem_avail_kb, ip, disk`
 - 容器内读取固定路径：
   - 宿主机日志：`/var/lib/processor/log`
   - 输出目录：`/var/lib/processor`（与 CSV 同级）

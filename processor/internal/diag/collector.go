@@ -84,7 +84,7 @@ func (c *Collector) collectOnce() {
 		return
 	}
 
-	ts := time.Now().UTC().Format("20060102T150405Z")
+	ts := time.Now().In(diagLocation()).Format("20060102T150405+0800")
 	diagOut := filepath.Join(outDir, fmt.Sprintf("diag_%s_%s.json.gz", c.host, ts))
 
 	syslogEntries, _ := c.collectSyslogEntries(stateDir)
@@ -331,10 +331,10 @@ func parseEntryTime(value string) time.Time {
 		return time.Time{}
 	}
 	if t, err := time.Parse(time.RFC3339Nano, value); err == nil {
-		return t.UTC()
+		return t.In(diagLocation())
 	}
 	if t, err := time.Parse(time.RFC3339, value); err == nil {
-		return t.UTC()
+		return t.In(diagLocation())
 	}
 	return time.Time{}
 }

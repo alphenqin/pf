@@ -5,7 +5,7 @@ BASE_DIR="$(cd "$(dirname "$0")" && pwd)"
 DATA_DIR="${PF_DATA_DIR:-${1:-${BASE_DIR}/data}}"
 OUT_DIR="${DATA_DIR}/log"
 HOST="$(hostname -s 2>/dev/null || hostname)"
-TS="$(date -u +%Y%m%dT%H%M%SZ)"
+TS="$(TZ=Asia/Shanghai date +%Y%m%dT%H%M%S%z)"
 
 mkdir -p "${OUT_DIR}"
 
@@ -40,7 +40,7 @@ fi
 # ---- 环境信息（宿主机快照）----
 ENV_JSON="$(
   printf '{'
-  printf '"ts":"%s",' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  printf '"ts":"%s",' "$(TZ=Asia/Shanghai date +%Y-%m-%dT%H:%M:%S%:z)"
   printf '"host":"%s",' "${HOST}"
   if [ -f /etc/os-release ]; then
     OS_LINE="$(tr -d '\n' </etc/os-release | sed 's/"/\\"/g')"
@@ -53,6 +53,14 @@ ENV_JSON="$(
     printf '"uptime_sec":%s,' "$(cut -d. -f1 /proc/uptime)"
   else
     printf '"uptime_sec":0,'
+  fi
+  if [ -r /proc/loadavg ]; then
+    read -r LOAD1 LOAD5 LOAD15 _ </proc/loadavg
+    printf '"load1":%s,' "${LOAD1}"
+    printf '"load5":%s,' "${LOAD5}"
+    printf '"load15":%s,' "${LOAD15}"
+  else
+    printf '"load1":0,"load5":0,"load15":0,'
   fi
   printf '"cpu_cores":%s,' "$(nproc 2>/dev/null || echo 0)"
   if [ -r /proc/meminfo ]; then

@@ -87,7 +87,7 @@ func parseSyslogLine(line, defaultHost string) syslogEntry {
 		return entry
 	}
 
-	entry.TS = time.Now().UTC().Format(time.RFC3339Nano)
+	entry.TS = time.Now().In(diagLocation()).Format(time.RFC3339Nano)
 	entry.Host = defaultHost
 	entry.Level = inferLevel(line)
 	entry.Msg = line
@@ -96,22 +96,22 @@ func parseSyslogLine(line, defaultHost string) syslogEntry {
 
 func parseSyslogTime(value string) string {
 	if ts, err := time.Parse(time.RFC3339Nano, value); err == nil {
-		return ts.UTC().Format(time.RFC3339Nano)
+		return ts.In(diagLocation()).Format(time.RFC3339Nano)
 	}
 	if ts, err := time.Parse(time.RFC3339, value); err == nil {
-		return ts.UTC().Format(time.RFC3339Nano)
+		return ts.In(diagLocation()).Format(time.RFC3339Nano)
 	}
-	return time.Now().UTC().Format(time.RFC3339Nano)
+	return time.Now().In(diagLocation()).Format(time.RFC3339Nano)
 }
 
 func parseRFC3164Time(month, day, clock string) string {
-	year := time.Now().Year()
+	year := time.Now().In(diagLocation()).Year()
 	raw := fmt.Sprintf("%d %s %s %s", year, month, day, clock)
-	ts, err := time.ParseInLocation("2006 Jan 2 15:04:05", raw, time.Local)
+	ts, err := time.ParseInLocation("2006 Jan 2 15:04:05", raw, diagLocation())
 	if err != nil {
-		return time.Now().UTC().Format(time.RFC3339Nano)
+		return time.Now().In(diagLocation()).Format(time.RFC3339Nano)
 	}
-	return ts.UTC().Format(time.RFC3339Nano)
+	return ts.In(diagLocation()).Format(time.RFC3339Nano)
 }
 
 func splitAppPid(value string) (string, int) {

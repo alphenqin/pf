@@ -268,6 +268,7 @@ RUN set -eux; \
 RUN cat >/usr/local/bin/supervisor_entry.sh <<'EOF'
 #!/usr/bin/env bash
 set -eu
+umask 022
 
 # 生成 supervisord 配置
 cat >/etc/supervisor/supervisord.conf <<'CONF'

@@ -93,7 +93,7 @@ func collectProcMetricsSnapshot(prev procMetricState) ([]procMetric, procMetricS
 		}
 
 		metrics = append(metrics, procMetric{
-			TS:      time.Now().UTC().Format(time.RFC3339Nano),
+			TS:      time.Now().In(diagLocation()).Format(time.RFC3339Nano),
 			Level:   "info",
 			Msg:     "metrics",
 			Payload: payload,
