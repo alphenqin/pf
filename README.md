@@ -70,6 +70,52 @@ processor_diag_interval_sec: 600
   - `payload` 存放各类型特有字段（包含 CPU/内存/IO 等）
 - 日志文件输出到数据目录根目录，并上传至 FTP 的 `processor_ftp_dir`；打包成功后会清理已处理的宿主机日志与环境文件
 
+## 诊断采集与上传流程（syslog / env / proc）
+
+### 1) 宿主机采集（start.sh）
+
+- **syslog 增量截取**
+  - 读取 `/var/log/syslog` 或 `/var/log/messages`。
+  - 使用 inode + offset（`${OUT_DIR}/.${BASE_NAME}.state`）记录上次读取位置。
+  - 新增内容写入 `${OUT_DIR}/syslog_<host>_<ts>.log`。
+- **env 快照**
+  - 直接生成一行 JSON（含 `ts/host/os/kernel/uptime/load/cpu/mem/ip/disk` 等）。
+  - 用 `${OUT_DIR}/.env.state` 存 hash，内容未变化则不落盘。
+  - 变化时写入 `${OUT_DIR}/env_<host>_<ts>.json`。
+- **目录落点**
+  - `${OUT_DIR}` 默认是 `${PF_DATA_DIR}/log`，容器内固定挂载到 `/var/lib/processor/log`。
+
+### 2) 容器内诊断合并（processor / diag）
+
+- **syslog 解析**
+  - 扫描 `/var/lib/processor/log/syslog_*.log`，按文件名排序。
+  - 已处理文件记录在 `data/diag/syslog_processed.list`，避免重复。
+  - 解析 RFC5424 / RFC3164；`host` 为日志行内主机名，若为空回退到本机 FQDN。
+  - 生成标准化记录：`ts/host/src/level/msg/payload`。
+- **env 读取**
+  - 读取 `/var/lib/processor/log` 下最新 `env_*.json`。
+  - 记录 `data/diag/env_latest.state`，仅当文件变化时更新。
+  - 组装 `env` 记录：`src=env`，`host` 若缺失则使用本机 FQDN。
+- **proc 指标采集**
+  - 读取 `/proc`，针对 `pmacctd/nfacctd/processor` 采样。
+  - 计算 CPU 使用率（delta jiffies），并采集内存/IO/FD 等。
+  - 记录 `src=proc`，`level=info`。
+- **合并与输出**
+  - 当 syslog/proc/env 任一有数据时，写入 `diag_<host>_<ts>.json.gz`。
+  - JSON Lines 格式，按 `ts` 排序。
+  - 写入成功后清理已处理的 syslog/env 源文件。
+
+### 3) 上传流程（uploader）
+
+- 扫描数据目录（`/var/lib/processor`），上传：
+  - `*.csv.gz`（流量数据）
+  - `*.json.gz`（诊断数据）
+- **上传逻辑**
+  - 每次扫描先清理远端残留 `.tmp` 文件。
+  - 上传时先传到 `filename.tmp`，校验大小后 `Rename` 成正式文件。
+  - 远端同名且大小一致则跳过。
+  - 成功后删除本地文件；失败保留，等待下次扫描重试。
+
 ## 从容器拷出宿主机采集脚本
 
 镜像内内置 `/usr/local/bin/start.sh`，可拷出到宿主机执行：
