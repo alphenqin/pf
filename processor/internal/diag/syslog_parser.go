@@ -158,8 +158,24 @@ func inferLevel(msg string) string {
 }
 
 func fallbackHost(h, def string) string {
-	if strings.TrimSpace(h) == "" {
+	h = strings.TrimSpace(h)
+	if h == "" {
 		return def
+	}
+	def = strings.TrimSpace(def)
+	if def == "" {
+		return h
+	}
+	// If syslog provides a short hostname that matches our local short name,
+	// prefer the FQDN to keep host identifiers consistent.
+	if !strings.Contains(h, ".") {
+		short := def
+		if i := strings.IndexByte(def, '.'); i > 0 {
+			short = def[:i]
+		}
+		if h == short {
+			return def
+		}
 	}
 	return h
 }

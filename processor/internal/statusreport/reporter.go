@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/pmacct/processor/internal/config"
+	"github.com/pmacct/processor/internal/host"
 )
 
 // Reporter 负责聚合流量统计并定期上报
@@ -40,8 +41,7 @@ func NewReporter(cfg config.StatusReportConfig) (*Reporter, error) {
 
 	uuid := strings.TrimSpace(cfg.UUID)
 	if uuid == "" {
-		h, _ := os.Hostname()
-		uuid = h
+		uuid = host.FQDN()
 	}
 
 	return &Reporter{

@@ -4,7 +4,7 @@ set -eu
 BASE_DIR="$(cd "$(dirname "$0")" && pwd)"
 DATA_DIR="${PF_DATA_DIR:-${1:-${BASE_DIR}/data}}"
 OUT_DIR="${DATA_DIR}/log"
-HOST="$(hostname -s 2>/dev/null || hostname)"
+HOST="$(hostname -f 2>/dev/null || uname -n 2>/dev/null || hostname)"
 TS="$(TZ=Asia/Shanghai date +%Y%m%dT%H%M%S%z)"
 
 mkdir -p "${OUT_DIR}"

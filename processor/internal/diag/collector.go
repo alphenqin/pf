@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/pmacct/processor/internal/config"
+	"github.com/pmacct/processor/internal/host"
 )
 
 type Collector struct {
@@ -31,17 +32,13 @@ const (
 )
 
 func NewCollector(ctx context.Context, cfg config.DiagConfig, dataDir string) *Collector {
-	host, _ := os.Hostname()
-	if host == "" {
-		host = "unknown"
-	}
 	return &Collector{
 		ctx:      ctx,
 		cfg:      cfg,
 		dataDir:  dataDir,
 		stopChan: make(chan struct{}),
 		doneChan: make(chan struct{}),
-		host:     host,
+		host:     host.FQDN(),
 	}
 }
 
