@@ -26,6 +26,8 @@ type ProcessorConfig struct {
 	UploadIntervalSec    int
 	DebugPrintInterval   int // 调试打印间隔（行数），默认为0（不打印）
 	DebugPrintStartLines int // 调试打印开始行数，前N行会打印，默认为0（不打印）
+	IngestChanCapacity   int // stdin -> writer 通道容量（行数）
+	IngestChanTimeoutMs  int // 通道写入超时（毫秒），超时则丢弃该行
 	StatusReport         StatusReportConfig
 }
 
@@ -125,7 +127,10 @@ func LoadConfig(configPath string) (*ProcessorConfig, error) {
 		return nil, fmt.Errorf("未找到 processor_* 配置项，请在 pmacct.conf 中添加 processor_ 开头的 key: value")
 	}
 
-	cfg := &ProcessorConfig{}
+	cfg := &ProcessorConfig{
+		IngestChanCapacity:  -1,
+		IngestChanTimeoutMs: -1,
+	}
 
 	cfg.FTPHost = kv[processorPrefix+"ftp_host"]
 	cfg.FTPUser = kv[processorPrefix+"ftp_user"]
@@ -217,6 +222,20 @@ func LoadConfig(configPath string) (*ProcessorConfig, error) {
 			cfg.DebugPrintInterval = num
 		}
 	}
+	if v, ok := kv[processorPrefix+"ingest_chan_capacity"]; ok {
+		if num, err := strconv.Atoi(v); err != nil {
+			return nil, fmt.Errorf("processor_ingest_chan_capacity 不是整数: %w", err)
+		} else {
+			cfg.IngestChanCapacity = num
+		}
+	}
+	if v, ok := kv[processorPrefix+"ingest_chan_timeout_ms"]; ok {
+		if num, err := strconv.Atoi(v); err != nil {
+			return nil, fmt.Errorf("processor_ingest_chan_timeout_ms 不是整数: %w", err)
+		} else {
+			cfg.IngestChanTimeoutMs = num
+		}
+	}
 	if v, ok := kv[processorPrefix+"status_report_enabled"]; ok {
 		b, err := parseBool(v)
 		if err != nil {
@@ -273,6 +292,16 @@ func validateConfig(cfg *ProcessorConfig) error {
 	// 设置调试打印间隔默认值
 	if cfg.DebugPrintInterval < 0 {
 		cfg.DebugPrintInterval = 0 // 默认不打印
+	}
+	if cfg.IngestChanCapacity == -1 {
+		cfg.IngestChanCapacity = 10000
+	} else if cfg.IngestChanCapacity <= 0 {
+		return fmt.Errorf("processor_ingest_chan_capacity 必须 >= 1")
+	}
+	if cfg.IngestChanTimeoutMs == -1 {
+		cfg.IngestChanTimeoutMs = 100
+	} else if cfg.IngestChanTimeoutMs < 0 {
+		return fmt.Errorf("processor_ingest_chan_timeout_ms 必须 >= 0")
 	}
 	if cfg.StatusReport.Enabled {
 		if cfg.StatusReport.IntervalSec < 1 {

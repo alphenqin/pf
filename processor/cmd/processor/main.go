@@ -96,7 +96,7 @@ func main() {
 	}
 
 	// 创建数据通道（带缓冲）
-	dataChan := make(chan model.DataLine, 10000)
+	dataChan := make(chan model.DataLine, cfg.IngestChanCapacity)
 
 	// 启动 writer goroutine
 	writerDone := make(chan error, 1)
@@ -111,7 +111,7 @@ func main() {
 	// 启动从 stdin 读取的 goroutine
 	ingestDone := make(chan error, 1)
 	go func() {
-		ingestDone <- runIngest(ctx, dataChan, reporter, cfg.DebugPrintInterval)
+		ingestDone <- runIngest(ctx, dataChan, reporter, cfg.DebugPrintInterval, time.Duration(cfg.IngestChanTimeoutMs)*time.Millisecond)
 	}()
 
 	// 等待信号或完成
@@ -189,7 +189,7 @@ func min(a, b int) int {
 }
 
 // runIngest 从标准输入读取数据并放入channel
-func runIngest(ctx context.Context, dataChan chan<- model.DataLine, reporter *statusreport.Reporter, debugPrintInterval int) error {
+func runIngest(ctx context.Context, dataChan chan<- model.DataLine, reporter *statusreport.Reporter, debugPrintInterval int, chanTimeout time.Duration) error {
 	scanner := bufio.NewScanner(os.Stdin)
 	lineCount := 0
 	headerProcessed := false
@@ -253,13 +253,21 @@ func runIngest(ctx context.Context, dataChan chan<- model.DataLine, reporter *st
 			}
 
 			// 将数据行放入channel，带超时保护
-			select {
-			case dataChan <- model.DataLine{Line: outputLine, IsHeader: false}:
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(100 * time.Millisecond):
-				// channel满时，记录警告并丢弃数据
-				log.Printf("[WARN] 数据通道满，丢弃数据行: %s", outputLine[:min(len(outputLine), 100)])
+			if chanTimeout <= 0 {
+				select {
+				case dataChan <- model.DataLine{Line: outputLine, IsHeader: false}:
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			} else {
+				select {
+				case dataChan <- model.DataLine{Line: outputLine, IsHeader: false}:
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(chanTimeout):
+					// channel满时，记录警告并丢弃数据
+					log.Printf("[WARN] 数据通道满，丢弃数据行: %s", outputLine[:min(len(outputLine), 100)])
+				}
 			}
 
 			lineCount++

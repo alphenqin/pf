@@ -41,6 +41,9 @@ processor_file_prefix: flows_
 processor_upload_interval_sec: 600
 processor_timezone: Asia/Shanghai
 processor_debug_print_interval: 0
+processor_ingest_chan_capacity: 10000
+processor_ingest_chan_timeout_ms: 100
+# 超时设为 0 表示不丢弃（阻塞等待写入）
 
 processor_status_report_enabled: false
 processor_status_report_url: http://127.0.0.1:8080/api/uploadStatus
