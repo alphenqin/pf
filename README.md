@@ -63,7 +63,15 @@ processor_diag_interval_sec: 600
 - 宿主机脚本产出：
   - `syslog_*.log`（原始系统日志增量片段）
   - `env_*.json`（环境信息快照）
-    - 字段：`ts, host, os, kernel, uptime_sec, load1, load5, load15, cpu_cores, mem_total_kb, mem_avail_kb, ip, disk`
+    - 字段结构与 `system_monitor` 保持一致：
+      - `disk_info[]`
+      - `cpu_info`
+      - `mem_info`
+      - `host_info`
+      - `gpu_info[]`
+      - `disk_io[]`
+      - `ip`
+      - `exec_time`
 - 容器内读取固定路径：
   - 宿主机日志：`/var/lib/processor/log`
   - 输出目录：`/var/lib/processor`（与 CSV 同级）
@@ -82,11 +90,25 @@ processor_diag_interval_sec: 600
   - 使用 inode + offset（`${OUT_DIR}/.${BASE_NAME}.state`）记录上次读取位置。
   - 新增内容写入 `${OUT_DIR}/syslog_<host>_<ts>.log`。
 - **env 快照**
-  - 直接生成一行 JSON（含 `ts/host/os/kernel/uptime/load/cpu/mem/ip/disk` 等）。
+  - 使用 `system_monitor` 口径生成 JSON（字段结构与 `system_monitor` 的 `sysinfo` 一致）。
   - 用 `${OUT_DIR}/.env.state` 存 hash，内容未变化则不落盘。
   - 变化时写入 `${OUT_DIR}/env_<host>_<ts>.json`。
 - **目录落点**
   - `${OUT_DIR}` 默认是 `${PF_DATA_DIR}/log`，容器内固定挂载到 `/var/lib/processor/log`。
+
+### 宿主机 start.sh 运行流程（当前实现）
+
+1) **自动写入 cron（每 5 分钟）**  
+   - 运行 `start.sh` 时会检查是否已存在以下任务，若不存在则写入：  
+     `*/5 * * * * PF_DATA_DIR=<data_dir> /mnt/d/projects/pf/start.sh >/dev/null 2>&1`
+2) **系统日志增量采集**  
+   - 从 `/var/log/syslog` 或 `/var/log/messages` 读取新增内容  
+   - 写入 `${OUT_DIR}/syslog_<host>_<ts>.log`
+3) **环境信息采集（system_monitor 口径）**  
+   - 调用根目录的 `system_monitor_linux_amd64` 或 `system_monitor_linux_arm64`  
+   - 内置配置：Kafka/Redis 关闭、日志输出到 stdout  
+   - 从 stdout 提取 `bytesData info: {…}` JSON  
+   - JSON 变化时写入 `${OUT_DIR}/env_<host>_<ts>.json`
 
 ### 2) 容器内诊断合并（processor / diag）
 
@@ -125,20 +147,20 @@ processor_diag_interval_sec: 600
 
 ```bash
 docker cp <container>:/usr/local/bin/start.sh /mnt/d/projects/pf/start.sh
+docker cp <container>:/usr/local/bin/system_monitor_linux_amd64 /mnt/d/projects/pf/system_monitor_linux_amd64
+docker cp <container>:/usr/local/bin/system_monitor_linux_arm64 /mnt/d/projects/pf/system_monitor_linux_arm64
 chmod +x /mnt/d/projects/pf/start.sh
 ```
 
-宿主机运行示例：
+宿主机运行示例（会自动写入每 5 分钟的 cron 任务）：
 
 ```bash
-PF_DATA_DIR=/mnt/d/projects/pf/data /mnt/d/projects/pf/start.sh
+PF_DATA_DIR=/mnt/d/projects/pf/data ./start.sh
 ```
 
-定时运行示例（每 5 分钟）：
-
-```bash
-*/5 * * * * PF_DATA_DIR=/mnt/d/projects/pf/data /mnt/d/projects/pf/start.sh >/dev/null 2>&1
-```
+说明：
+- `start.sh` 会自动写入 cron，无需手动配置 crontab。
+- 如果不用 `./` 或绝对路径，需保证 `start.sh` 在 PATH 中。
 
 ## 构建镜像
 

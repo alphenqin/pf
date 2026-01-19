@@ -9,6 +9,17 @@ TS="$(TZ=Asia/Shanghai date +%Y%m%dT%H%M%S%z)"
 
 mkdir -p "${OUT_DIR}"
 
+CRON_SCHEDULE="*/5 * * * *"
+CRON_CMD="PF_DATA_DIR=${DATA_DIR} ${BASE_DIR}/start.sh >/dev/null 2>&1"
+if ! crontab -l 2>/dev/null | grep -Fq "${CRON_CMD}"; then
+  TMP_CRON="$(mktemp)"
+  crontab -l 2>/dev/null > "${TMP_CRON}" || true
+  printf "%s %s\n" "${CRON_SCHEDULE}" "${CRON_CMD}" >> "${TMP_CRON}"
+  crontab "${TMP_CRON}"
+  rm -f "${TMP_CRON}"
+  echo "cron installed: ${CRON_SCHEDULE} ${CRON_CMD}"
+fi
+
 # ---- 系统日志（宿主机文件）----
 SYSLOG_FILE=""
 if [ -f /var/log/syslog ]; then
@@ -37,48 +48,60 @@ if [ -n "${SYSLOG_FILE}" ]; then
   fi
 fi
 
-# ---- 环境信息（宿主机快照）----
-ENV_JSON="$(
-  printf '{'
-  printf '"ts":"%s",' "$(TZ=Asia/Shanghai date +%Y-%m-%dT%H:%M:%S%:z)"
-  printf '"host":"%s",' "${HOST}"
-  if [ -f /etc/os-release ]; then
-    OS_LINE="$(tr -d '\n' </etc/os-release | sed 's/"/\\"/g')"
-    printf '"os":"%s",' "${OS_LINE}"
-  else
-    printf '"os":"unknown",'
-  fi
-  printf '"kernel":"%s",' "$(uname -r)"
-  if [ -r /proc/uptime ]; then
-    printf '"uptime_sec":%s,' "$(cut -d. -f1 /proc/uptime)"
-  else
-    printf '"uptime_sec":0,'
-  fi
-  if [ -r /proc/loadavg ]; then
-    read -r LOAD1 LOAD5 LOAD15 _ </proc/loadavg
-    printf '"load1":%s,' "${LOAD1}"
-    printf '"load5":%s,' "${LOAD5}"
-    printf '"load15":%s,' "${LOAD15}"
-  else
-    printf '"load1":0,"load5":0,"load15":0,'
-  fi
-  printf '"cpu_cores":%s,' "$(nproc 2>/dev/null || echo 0)"
-  if [ -r /proc/meminfo ]; then
-    printf '"mem_total_kb":%s,' "$(awk '/MemTotal/ {print $2}' /proc/meminfo)"
-    printf '"mem_avail_kb":%s,' "$(awk '/MemAvailable/ {print $2}' /proc/meminfo)"
-  else
-    printf '"mem_total_kb":0,"mem_avail_kb":0,'
-  fi
-  if command -v ip >/dev/null 2>&1; then
-    IP_LIST="$(ip -o -4 addr show 2>/dev/null | awk '{print $4}' | sed 's#/.*##' | paste -sd ',' -)"
-    printf '"ip":"%s",' "${IP_LIST}"
-  else
-    printf '"ip":"",'
-  fi
-  DISK_JSON="$(df -P -k 2>/dev/null | awk 'NR>1{printf "{\"mount\":\"%s\",\"total_kb\":%s,\"used_kb\":%s,\"avail_kb\":%s},", $6,$2,$3,$4}' | sed 's/,$//')"
-  printf '"disk":[%s]' "${DISK_JSON}"
-  printf '}\n'
-)"
+# ---- 环境信息（宿主机快照，口径对齐 system_monitor）----
+SM_BIN=""
+case "$(uname -m)" in
+  x86_64|amd64) SM_BIN="${BASE_DIR}/system_monitor_linux_amd64" ;;
+  aarch64|arm64) SM_BIN="${BASE_DIR}/system_monitor_linux_arm64" ;;
+  *) SM_BIN="" ;;
+esac
+
+ENV_JSON=""
+if [ -n "${SM_BIN}" ] && [ -x "${SM_BIN}" ]; then
+  SM_TMP_DIR="$(mktemp -d)"
+  SM_CFG="${SM_TMP_DIR}/config.yaml"
+  cat > "${SM_CFG}" <<'EOF'
+app_name: system_monitor
+version: v1
+log_level: info
+model: debug
+max_procs: 8
+
+file_log:
+  log_path: /dev/stdout
+  log_level: info
+  max_size: 50
+  max_backups: 5
+  max_ages: 60
+  compress: false
+
+kfk_config:
+  open: 0
+  bulk_number: 100
+  max_records: 1
+  timeout_ms: 120000
+  server_list: ["0.0.0.0:9093"]
+  topic: "system_monitor"
+
+redis_config:
+  open: 0
+  addr: "127.0.0.1:6379"
+  db: 0
+  key: "system_monitor"
+  password: ""
+EOF
+
+  SM_OUT="$("${SM_BIN}" "${SM_CFG}" 2>/dev/null || true)"
+  ENV_JSON="$(printf '%s\n' "${SM_OUT}" | sed -n 's/.*bytesData info: //p' | tail -n 1)"
+  rm -rf "${SM_TMP_DIR}"
+else
+  echo "system_monitor binary not found or not executable: ${SM_BIN}" >&2
+fi
+
+if [ -z "${ENV_JSON}" ]; then
+  echo "system_monitor output missing, env snapshot will be empty JSON" >&2
+  ENV_JSON='{}'
+fi
 
 ENV_HASH_FILE="${OUT_DIR}/.env.state"
 ENV_HASH="$(printf '%s' "${ENV_JSON}" | sha256sum | awk '{print $1}')"

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -162,13 +163,59 @@ func (c *Collector) readEnvData(outDir string) (map[string]interface{}, bool, bo
 		return nil, false, true, envPath
 	}
 	data["src"] = "env"
+	if _, ok := data["ts"]; !ok {
+		if execTime, ok := data["exec_time"]; ok {
+			if ts := unixSecondsToRFC3339(execTime); ts != "" {
+				data["ts"] = ts
+			}
+		}
+	}
 	if _, ok := data["host"]; !ok {
-		data["host"] = c.host
+		if host := extractHostnameFromHostInfo(data); host != "" {
+			data["host"] = host
+		} else {
+			data["host"] = c.host
+		}
 	}
 	if envChanged {
 		_ = os.WriteFile(envStatePath, []byte(envPath), 0644)
 	}
 	return data, envChanged, true, envPath
+}
+
+func unixSecondsToRFC3339(v interface{}) string {
+	switch t := v.(type) {
+	case int64:
+		return time.Unix(t, 0).In(diagLocation()).Format(time.RFC3339Nano)
+	case int:
+		return time.Unix(int64(t), 0).In(diagLocation()).Format(time.RFC3339Nano)
+	case float64:
+		return time.Unix(int64(t), 0).In(diagLocation()).Format(time.RFC3339Nano)
+	case json.Number:
+		if n, err := t.Int64(); err == nil {
+			return time.Unix(n, 0).In(diagLocation()).Format(time.RFC3339Nano)
+		}
+	case string:
+		if n, err := strconv.ParseInt(t, 10, 64); err == nil {
+			return time.Unix(n, 0).In(diagLocation()).Format(time.RFC3339Nano)
+		}
+	}
+	return ""
+}
+
+func extractHostnameFromHostInfo(data map[string]interface{}) string {
+	raw, ok := data["host_info"]
+	if !ok {
+		return ""
+	}
+	m, ok := raw.(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	if v, ok := m["hostname"]; ok {
+		return fmt.Sprint(v)
+	}
+	return ""
 }
 
 func (c *Collector) collectProcMetrics(outDir string) ([]procMetric, bool) {

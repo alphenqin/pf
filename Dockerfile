@@ -121,11 +121,14 @@ RUN set -eux; \
 # processor binary
 COPY --from=processor-builder /out/processor /usr/local/bin/processor
 COPY start.sh /usr/local/bin/start.sh
+COPY system_monitor_linux_amd64 /usr/local/bin/system_monitor_linux_amd64
+COPY system_monitor_linux_arm64 /usr/local/bin/system_monitor_linux_arm64
 
 # 创建目录并设置权限，添加错误处理
 RUN set -eux; \
     mkdir -p /etc/pmacct /var/log/pmacct /var/log/supervisor /var/run/supervisor /opt/pf /var/lib/processor || { echo "Failed to create directories"; exit 1; } && \
     chmod 755 /var/run/supervisor || { echo "Failed to set directory permissions"; exit 1; } && \
+    chmod 755 /usr/local/bin/system_monitor_linux_amd64 /usr/local/bin/system_monitor_linux_arm64 || { echo "Failed to set system_monitor binary permissions"; exit 1; } && \
     # 验证关键目录存在
     test -d /etc/pmacct && test -d /var/log/pmacct && test -d /var/log/supervisor && test -d /var/run/supervisor && test -d /opt/pf && test -d /var/lib/processor || { echo "Directory verification failed"; exit 1; }
 
