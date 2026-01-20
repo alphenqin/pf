@@ -170,7 +170,8 @@ func isHeaderLine(line string) bool {
 		"flowstart", "timestamp",
 		"src_ip", "dst_ip", "src_host", "dst_host",
 		"src_port", "dst_port", "protocol", "proto", "tos",
-		"packet", "octet", "bytes",
+		"tcp_flags", "timestamp_min", "timestamp_max",
+		"packet", "packets", "octet", "bytes",
 	}
 	for _, kw := range headerKeywords {
 		if strings.Contains(lower, kw) {
