@@ -5,20 +5,23 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"strconv"
 	"strings"
 	"syscall"
+	"sync/atomic"
 	"time"
 
 	"github.com/pmacct/processor/internal/batchwriter"
 	"github.com/pmacct/processor/internal/config"
 	"github.com/pmacct/processor/internal/diag"
+	"github.com/pmacct/processor/internal/errorlog"
 	"github.com/pmacct/processor/internal/model"
 	"github.com/pmacct/processor/internal/statusreport"
 	"github.com/pmacct/processor/internal/uploader"
+	"github.com/pmacct/processor/internal/validator"
 )
 
 var (
@@ -29,28 +32,44 @@ var (
 
 func main() {
 	flag.Parse()
+	setupLogger(*logLevel)
 
 	// 验证必需参数
 	if *configPath == "" {
-		log.Fatal("[ERROR] -config 参数是必需的")
+		slog.Error("-config 参数是必需的")
+		os.Exit(1)
 	}
 	if *dataDir == "" {
-		log.Fatal("[ERROR] -data-dir 参数是必需的")
+		slog.Error("-data-dir 参数是必需的")
+		os.Exit(1)
 	}
 
 	// 加载配置
 	cfg, err := config.LoadConfig(*configPath)
 	if err != nil {
-		log.Fatalf("[ERROR] 加载配置失败: %v", err)
+		slog.Error("加载配置失败", "err", err)
+		os.Exit(1)
 	}
-	log.Printf("[INFO] 配置加载成功: FTP=%s:%d, 滚动间隔=%ds, 滚动大小=%dMB, 上传间隔=%ds",
-		cfg.FTPHost, cfg.FTPPort, cfg.RotateIntervalSec, cfg.RotateSizeMB, cfg.UploadIntervalSec)
+	slog.Info("配置加载成功",
+		"ftp_host", cfg.FTPHost,
+		"ftp_port", cfg.FTPPort,
+		"rotate_interval_sec", cfg.RotateIntervalSec,
+		"rotate_size_mb", cfg.RotateSizeMB,
+		"upload_interval_sec", cfg.UploadIntervalSec,
+	)
 
 	// 确保数据目录存在
 	if err := config.EnsureDataDir(*dataDir); err != nil {
-		log.Fatalf("[ERROR] 数据目录准备失败: %v", err)
+		slog.Error("数据目录准备失败", "err", err)
+		os.Exit(1)
 	}
-	log.Printf("[INFO] 数据目录已就绪: %s", *dataDir)
+	slog.Info("数据目录已就绪", "data_dir", *dataDir)
+
+	// 错误行落盘
+	errWriter, err := errorlog.NewLineWriter(*dataDir)
+	if err != nil {
+		slog.Error("初始化错误行写入器失败", "err", err)
+	}
 
 	// 公共上下文
 	ctx, cancel := context.WithCancel(context.Background())
@@ -62,12 +81,13 @@ func main() {
 	// 状态上报器
 	reporter, err := statusreport.NewReporter(cfg.StatusReport)
 	if err != nil {
-		log.Fatalf("[ERROR] 初始化状态上报失败: %v", err)
+		slog.Error("初始化状态上报失败", "err", err)
+		os.Exit(1)
 	}
 	// 运行上报 goroutine（如果启用）
 	if reporter != nil {
 		go reporter.Run(ctx.Done())
-		log.Printf("[INFO] 状态上报已启用，目标: %s，周期: %ds", cfg.StatusReport.URL, cfg.StatusReport.IntervalSec)
+		slog.Info("状态上报已启用", "url", cfg.StatusReport.URL, "interval_sec", cfg.StatusReport.IntervalSec)
 	}
 
 	// 创建 Uploader
@@ -85,14 +105,25 @@ func main() {
 
 	// 启动上传器
 	up.Start()
-	log.Printf("[INFO] FTP 上传器已启动，上传间隔: %ds", cfg.UploadIntervalSec)
+	slog.Info("FTP 上传器已启动", "interval_sec", cfg.UploadIntervalSec)
 
 	// 启动诊断采集（宿主机日志结构化 + 进程日志）
 	var diagCollector *diag.Collector
+	var csvTotal atomic.Int64
+	var csvDNS atomic.Int64
 	if cfg.Diag.Enabled {
 		diagCollector = diag.NewCollector(ctx, cfg.Diag, *dataDir)
+		diagCollector.SetProcPayloadEnricher(func(procName string) map[string]interface{} {
+			if procName != "processor" {
+				return nil
+			}
+			return map[string]interface{}{
+				"csv_total": csvTotal.Load(),
+				"csv_dns":   csvDNS.Load(),
+			}
+		})
 		diagCollector.Start()
-		log.Printf("[INFO] 诊断采集已启用，间隔: %ds", cfg.Diag.IntervalSec)
+		slog.Info("诊断采集已启用", "interval_sec", cfg.Diag.IntervalSec)
 	}
 
 	// 创建数据通道（带缓冲）
@@ -111,13 +142,22 @@ func main() {
 	// 启动从 stdin 读取的 goroutine
 	ingestDone := make(chan error, 1)
 	go func() {
-		ingestDone <- runIngest(ctx, dataChan, reporter, cfg.DebugPrintInterval, time.Duration(cfg.IngestChanTimeoutMs)*time.Millisecond)
+		ingestDone <- runIngest(
+			ctx,
+			dataChan,
+			reporter,
+			cfg.DebugPrintInterval,
+			time.Duration(cfg.IngestChanTimeoutMs)*time.Millisecond,
+			errWriter,
+			&csvTotal,
+			&csvDNS,
+		)
 	}()
 
 	// 等待信号或完成
 	select {
 	case sig := <-sigChan:
-		log.Printf("[INFO] 收到信号: %v，开始优雅关闭...", sig)
+		slog.Info("收到信号，开始优雅关闭", "signal", sig.String())
 		cancel()
 		// 等待所有 goroutine 完成
 		<-ingestDone
@@ -125,13 +165,13 @@ func main() {
 		<-writerDone
 	case err := <-ingestDone:
 		if err != nil {
-			log.Printf("[ERROR] 读取 stdin 时出错: %v", err)
+			slog.Error("读取 stdin 时出错", "err", err)
 		}
 		close(dataChan)
 		<-writerDone
 	case err := <-writerDone:
 		if err != nil {
-			log.Printf("[ERROR] 批量写入时出错: %v", err)
+			slog.Error("批量写入时出错", "err", err)
 		}
 		cancel()
 		<-ingestDone
@@ -139,9 +179,15 @@ func main() {
 
 	// 关闭 batch writer（确保当前文件被正确关闭和重命名）
 	if err := bw.Close(); err != nil {
-		log.Printf("[ERROR] 关闭 batch writer 失败: %v", err)
+		slog.Error("关闭 batch writer 失败", "err", err)
 	} else {
-		log.Printf("[INFO] Batch writer 已关闭")
+		slog.Info("Batch writer 已关闭")
+	}
+
+	if errWriter != nil {
+		if err := errWriter.Close(); err != nil {
+			slog.Error("关闭错误行写入器失败", "err", err)
+		}
 	}
 
 	if diagCollector != nil {
@@ -149,7 +195,7 @@ func main() {
 	}
 	// 停止上传器
 	up.Stop()
-	log.Printf("[INFO] 程序退出")
+	slog.Info("程序退出")
 }
 
 // parseCounts 从行中按索引解析包/字节数
@@ -181,6 +227,16 @@ func isHeaderLine(line string) bool {
 	return false
 }
 
+func isDNSLine(line string) bool {
+	fields := strings.Split(line, ",")
+	if len(fields) < 4 {
+		return false
+	}
+	srcPort := strings.TrimSpace(fields[2])
+	dstPort := strings.TrimSpace(fields[3])
+	return srcPort == "53" || dstPort == "53"
+}
+
 // min 返回两个整数中的较小值
 func min(a, b int) int {
 	if a < b {
@@ -190,7 +246,7 @@ func min(a, b int) int {
 }
 
 // runIngest 从标准输入读取数据并放入channel
-func runIngest(ctx context.Context, dataChan chan<- model.DataLine, reporter *statusreport.Reporter, debugPrintInterval int, chanTimeout time.Duration) error {
+func runIngest(ctx context.Context, dataChan chan<- model.DataLine, reporter *statusreport.Reporter, debugPrintInterval int, chanTimeout time.Duration, errWriter *errorlog.LineWriter, csvTotal *atomic.Int64, csvDNS *atomic.Int64) error {
 	scanner := bufio.NewScanner(os.Stdin)
 	lineCount := 0
 	headerProcessed := false
@@ -204,11 +260,11 @@ func runIngest(ctx context.Context, dataChan chan<- model.DataLine, reporter *st
 		default:
 			if !scanner.Scan() {
 				if err := scanner.Err(); err != nil {
-					log.Printf("[ERROR] 读取 stdin 失败: %v", err)
+					slog.Error("读取 stdin 失败", "err", err)
 					return fmt.Errorf("读取 stdin 失败: %w", err)
 				}
 				// EOF
-				log.Printf("[INFO] 从 stdin 读取完成，共处理 %d 行", lineCount)
+				slog.Info("从 stdin 读取完成", "lines", lineCount)
 				return nil
 			}
 
@@ -216,6 +272,8 @@ func runIngest(ctx context.Context, dataChan chan<- model.DataLine, reporter *st
 			if len(line) == 0 {
 				continue
 			}
+
+			currentLineNo := lineCount + 1
 
 			// 处理表头行：解析字段索引（表头行会被丢弃）
 			if !headerProcessed {
@@ -238,6 +296,24 @@ func runIngest(ctx context.Context, dataChan chan<- model.DataLine, reporter *st
 				}
 			}
 
+			if ok, reason := validator.ValidateLine(line, time.Now()); !ok {
+				slog.Warn("无效CSV行", "line_no", currentLineNo, "reason", reason, "line", line)
+				if errWriter != nil {
+					if err := errWriter.Write(currentLineNo, line, reason); err != nil {
+						slog.Error("写入 errorline.csv 失败", "err", err)
+					}
+				}
+				lineCount++
+				continue
+			}
+
+			if csvTotal != nil {
+				csvTotal.Add(1)
+			}
+			if csvDNS != nil && isDNSLine(line) {
+				csvDNS.Add(1)
+			}
+
 			// 处理数据行
 			outputLine := line
 
@@ -250,7 +326,7 @@ func runIngest(ctx context.Context, dataChan chan<- model.DataLine, reporter *st
 
 			// 每隔指定行数打印CSV数据行内容用于调试
 			if debugPrintInterval > 0 && lineCount > 0 && lineCount%debugPrintInterval == 0 {
-				log.Printf("[DEBUG] CSV数据行 #%d: %s", lineCount, outputLine)
+				slog.Debug("CSV数据行", "line_no", lineCount, "line", outputLine)
 			}
 
 			// 将数据行放入channel，带超时保护
@@ -267,13 +343,13 @@ func runIngest(ctx context.Context, dataChan chan<- model.DataLine, reporter *st
 					return ctx.Err()
 				case <-time.After(chanTimeout):
 					// channel满时，记录警告并丢弃数据
-					log.Printf("[WARN] 数据通道满，丢弃数据行: %s", outputLine[:min(len(outputLine), 100)])
+					slog.Warn("数据通道满，丢弃数据行", "line", outputLine[:min(len(outputLine), 100)])
 				}
 			}
 
 			lineCount++
 			if lineCount%10000 == 0 {
-				log.Printf("[INFO] 已处理 %d 行数据", lineCount)
+				slog.Info("已处理行数", "lines", lineCount)
 			}
 		}
 	}
@@ -316,7 +392,7 @@ func runBatchWriter(ctx context.Context, bw *batchwriter.BatchWriter, dataChan <
 			if err := flushBatch(); err != nil {
 				return err
 			}
-			log.Printf("[INFO] 批量写入器已处理 %d 行数据，丢弃 %d 行数据", totalLines, droppedLines)
+			slog.Info("批量写入器统计", "processed_lines", totalLines, "dropped_lines", droppedLines)
 			return nil
 		case dataLine, ok := <-dataChan:
 			if !ok {
@@ -324,7 +400,7 @@ func runBatchWriter(ctx context.Context, bw *batchwriter.BatchWriter, dataChan <
 				if err := flushBatch(); err != nil {
 					return err
 				}
-				log.Printf("[INFO] 批量写入器已处理 %d 行数据，丢弃 %d 行数据", totalLines, droppedLines)
+				slog.Info("批量写入器统计", "processed_lines", totalLines, "dropped_lines", droppedLines)
 				return nil
 			}
 
@@ -344,7 +420,26 @@ func runBatchWriter(ctx context.Context, bw *batchwriter.BatchWriter, dataChan <
 			}
 		case <-reportTicker.C:
 			// 定期报告处理统计信息
-			log.Printf("[INFO] 批量写入器统计 - 已处理: %d 行, 丢弃: %d 行", totalLines, droppedLines)
+			slog.Info("批量写入器统计", "processed_lines", totalLines, "dropped_lines", droppedLines)
 		}
+	}
+}
+
+func setupLogger(level string) {
+	lvl := parseLogLevel(level)
+	handler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: lvl})
+	slog.SetDefault(slog.New(handler))
+}
+
+func parseLogLevel(s string) slog.Level {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "debug":
+		return slog.LevelDebug
+	case "warn", "warning":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
 	}
 }

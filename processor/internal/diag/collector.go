@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -25,6 +25,8 @@ type Collector struct {
 	stopChan chan struct{}
 	doneChan chan struct{}
 	host     string
+
+	procPayloadEnricher func(procName string) map[string]interface{}
 }
 
 const (
@@ -41,6 +43,12 @@ func NewCollector(ctx context.Context, cfg config.DiagConfig, dataDir string) *C
 		doneChan: make(chan struct{}),
 		host:     host.FQDN(),
 	}
+}
+
+// SetProcPayloadEnricher sets an optional payload enricher for proc metrics.
+// Call before Start().
+func (c *Collector) SetProcPayloadEnricher(fn func(procName string) map[string]interface{}) {
+	c.procPayloadEnricher = fn
 }
 
 func (c *Collector) Start() {
@@ -74,11 +82,11 @@ func (c *Collector) collectOnce() {
 	outDir := c.dataDir
 	stateDir := filepath.Join(c.dataDir, "diag")
 	if err := os.MkdirAll(outDir, 0755); err != nil {
-		log.Printf("[WARN] diag: 创建目录失败: %v", err)
+		slog.Warn("diag: 创建目录失败", "err", err)
 		return
 	}
 	if err := os.MkdirAll(stateDir, 0755); err != nil {
-		log.Printf("[WARN] diag: 创建状态目录失败: %v", err)
+		slog.Warn("diag: 创建状态目录失败", "err", err)
 		return
 	}
 
@@ -93,13 +101,13 @@ func (c *Collector) collectOnce() {
 		return
 	}
 	if err := writeDiagJSON(diagOut, syslogEntries, procMetrics, envData, envAvailable); err != nil {
-		log.Printf("[WARN] diag: 写入诊断文件失败: %v", err)
+		slog.Warn("diag: 写入诊断文件失败", "err", err)
 		return
 	}
 	if err := cleanupDiagSources(stateDir, envPath); err != nil {
-		log.Printf("[WARN] diag: 清理源文件失败: %v", err)
+		slog.Warn("diag: 清理源文件失败", "err", err)
 	}
-	log.Printf("[INFO] diag: 已生成诊断文件: %s (syslog=%d, proc=%d)", filepath.Base(diagOut), len(syslogEntries), len(procMetrics))
+	slog.Info("diag: 已生成诊断文件", "file", filepath.Base(diagOut), "syslog", len(syslogEntries), "proc", len(procMetrics))
 }
 
 func (c *Collector) collectSyslogEntries(outDir string) ([]syslogEntry, bool) {
@@ -130,7 +138,7 @@ func (c *Collector) collectSyslogEntries(outDir string) ([]syslogEntry, bool) {
 		}
 		entries, err := parseSyslogFile(path, c.host)
 		if err != nil {
-			log.Printf("[WARN] diag: 解析系统日志失败: %s -> %v", path, err)
+			slog.Warn("diag: 解析系统日志失败", "path", path, "err", err)
 			continue
 		}
 		if len(entries) > 0 {
@@ -142,7 +150,7 @@ func (c *Collector) collectSyslogEntries(outDir string) ([]syslogEntry, bool) {
 
 	if changed {
 		if err := writeStringSet(processedPath, processed); err != nil {
-			log.Printf("[WARN] diag: 保存系统日志状态失败: %v", err)
+			slog.Warn("diag: 保存系统日志状态失败", "err", err)
 		}
 	}
 	return all, changed
@@ -159,7 +167,7 @@ func (c *Collector) readEnvData(outDir string) (map[string]interface{}, bool, bo
 
 	data, err := readFirstJSONLine(envPath)
 	if err != nil {
-		log.Printf("[WARN] diag: 读取环境信息失败: %s -> %v", envPath, err)
+		slog.Warn("diag: 读取环境信息失败", "path", envPath, "err", err)
 		return nil, false, true, envPath
 	}
 	data["src"] = "env"
@@ -223,7 +231,7 @@ func (c *Collector) collectProcMetrics(outDir string) ([]procMetric, bool) {
 	prev := loadProcMetricState(statePath)
 	metrics, next := collectProcMetricsSnapshot(prev)
 	if err := saveProcMetricState(statePath, next); err != nil {
-		log.Printf("[WARN] diag: 保存进程状态失败: %v", err)
+		slog.Warn("diag: 保存进程状态失败", "err", err)
 	}
 	if len(metrics) == 0 {
 		return nil, false
@@ -231,6 +239,15 @@ func (c *Collector) collectProcMetrics(outDir string) ([]procMetric, bool) {
 	for i := range metrics {
 		metrics[i].Host = c.host
 		metrics[i].Src = "proc"
+		if c.procPayloadEnricher != nil && metrics[i].Payload != nil {
+			if name, ok := metrics[i].Payload["name"].(string); ok {
+				if extra := c.procPayloadEnricher(name); len(extra) > 0 {
+					for k, v := range extra {
+						metrics[i].Payload[k] = v
+					}
+				}
+			}
+		}
 	}
 	return metrics, true
 }

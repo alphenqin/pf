@@ -3,7 +3,7 @@ package uploader
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -72,7 +72,7 @@ func (u *Uploader) run() {
 		case <-u.stopChan:
 			return
 		case <-u.ctx.Done():
-			log.Printf("[INFO] 上下文已取消，停止上传器")
+			slog.Info("上下文已取消，停止上传器")
 			return
 		}
 	}
@@ -84,19 +84,19 @@ func (u *Uploader) scanAndUpload() {
 	if u.ctx != nil {
 		select {
 		case <-u.ctx.Done():
-			log.Printf("[INFO] 上下文已取消，跳过扫描上传")
+			slog.Info("上下文已取消，跳过扫描上传")
 			return
 		default:
 		}
 	}
 
 	if err := u.cleanupRemoteTempFiles(); err != nil {
-		log.Printf("[WARN] 清理远端临时文件失败: %v", err)
+		slog.Warn("清理远端临时文件失败", "err", err)
 	}
 
 	entries, err := os.ReadDir(u.dataDir)
 	if err != nil {
-		log.Printf("[ERROR] 扫描数据目录失败: %v", err)
+		slog.Error("扫描数据目录失败", "err", err)
 		return
 	}
 
@@ -126,14 +126,14 @@ func (u *Uploader) scanAndUpload() {
 		return
 	}
 
-	log.Printf("[INFO] 发现 %d 个待上传文件", len(filesToUpload))
+	slog.Info("发现待上传文件", "count", len(filesToUpload))
 
 	for _, filename := range filesToUpload {
 		// 检查上下文是否已取消
 		if u.ctx != nil {
 			select {
 			case <-u.ctx.Done():
-				log.Printf("[INFO] 上下文已取消，停止上传文件")
+				slog.Info("上下文已取消，停止上传文件")
 				return
 			default:
 			}
@@ -141,16 +141,16 @@ func (u *Uploader) scanAndUpload() {
 
 		filePath := filepath.Join(u.dataDir, filename)
 		if err := u.uploadFile(filePath, filename); err != nil {
-			log.Printf("[ERROR] FTP 上传失败: %s -> %v", filename, err)
+			slog.Error("FTP 上传失败", "file", filename, "err", err)
 			// 继续处理下一个文件，不删除失败的文件
 			continue
 		}
 
 		// 上传成功，删除本地文件
 		if err := os.Remove(filePath); err != nil {
-			log.Printf("[ERROR] 删除本地文件失败: %s -> %v", filename, err)
+			slog.Error("删除本地文件失败", "file", filename, "err", err)
 		} else {
-			log.Printf("[INFO] FTP 上传成功并删除本地文件: %s", filename)
+			slog.Info("FTP 上传成功并删除本地文件", "file", filename)
 		}
 	}
 }
@@ -166,7 +166,7 @@ func (u *Uploader) uploadFile(localPath, filename string) error {
 		}
 	}
 
-	log.Printf("[INFO] 准备上传文件: %s", filename)
+	slog.Info("准备上传文件", "file", filename)
 
 	// 获取本地文件大小
 	localInfo, err := os.Stat(localPath)
@@ -213,20 +213,20 @@ func (u *Uploader) uploadFile(localPath, filename string) error {
 	// 检查 FTP 服务器上是否已存在最终文件（避免重复上传）
 	if remoteSize, err := conn.FileSize(remotePath); err == nil {
 		if remoteSize == localSize {
-			log.Printf("[INFO] 远端已存在同名文件且大小一致，跳过上传: %s (size=%d)", filename, localSize)
+			slog.Info("远端已存在同名文件且大小一致，跳过上传", "file", filename, "size", localSize)
 			return nil
 		}
-		log.Printf("[WARN] 远端已存在同名文件但大小不一致，将尝试覆盖: %s (local=%d, remote=%d)", filename, localSize, remoteSize)
+		slog.Warn("远端已存在同名文件但大小不一致，将尝试覆盖", "file", filename, "local_size", localSize, "remote_size", remoteSize)
 		if err := conn.Delete(remotePath); err != nil {
-			log.Printf("[WARN] 删除远端旧文件失败（将继续尝试上传临时文件）: %s -> %v", remotePath, err)
+			slog.Warn("删除远端旧文件失败（将继续尝试上传临时文件）", "file", remotePath, "err", err)
 		}
 	}
 
 	// 如果存在残留临时文件，先尝试删除（避免改名冲突）
 	if remoteTempSize, err := conn.FileSize(remoteTempPath); err == nil {
-		log.Printf("[WARN] 发现远端残留临时文件，尝试删除: %s (size=%d)", remoteTempPath, remoteTempSize)
+		slog.Warn("发现远端残留临时文件，尝试删除", "file", remoteTempPath, "size", remoteTempSize)
 		if err := conn.Delete(remoteTempPath); err != nil {
-			log.Printf("[WARN] 删除远端临时文件失败（将继续尝试覆盖上传）: %s -> %v", remoteTempPath, err)
+			slog.Warn("删除远端临时文件失败（将继续尝试覆盖上传）", "file", remoteTempPath, "err", err)
 		}
 	}
 
@@ -238,7 +238,7 @@ func (u *Uploader) uploadFile(localPath, filename string) error {
 	defer file.Close()
 
 	// 上传文件到临时路径
-	log.Printf("[INFO] 开始上传临时文件: %s -> %s (size=%d)", filename, remoteTempPath, localSize)
+	slog.Info("开始上传临时文件", "file", filename, "remote_temp_path", remoteTempPath, "size", localSize)
 	if err := conn.Stor(remoteTempPath, file); err != nil {
 		return fmt.Errorf("上传临时文件失败: %w", err)
 	}
@@ -251,14 +251,14 @@ func (u *Uploader) uploadFile(localPath, filename string) error {
 	if remoteTempSize != localSize {
 		return fmt.Errorf("远端临时文件大小不一致: local=%d, remote=%d", localSize, remoteTempSize)
 	}
-	log.Printf("[INFO] 远端临时文件大小校验通过: %s (size=%d)", remoteTempPath, remoteTempSize)
+	slog.Info("远端临时文件大小校验通过", "remote_temp_path", remoteTempPath, "size", remoteTempSize)
 
 	// 重命名为最终文件
-	log.Printf("[INFO] 重命名远端临时文件: %s -> %s", remoteTempPath, remotePath)
+	slog.Info("重命名远端临时文件", "from", remoteTempPath, "to", remotePath)
 	if err := conn.Rename(remoteTempPath, remotePath); err != nil {
 		return fmt.Errorf("重命名远端文件失败: %w", err)
 	}
-	log.Printf("[INFO] 上传完成: %s (size=%d)", filename, localSize)
+	slog.Info("上传完成", "file", filename, "size", localSize)
 
 	return nil
 }
@@ -312,15 +312,15 @@ func (u *Uploader) cleanupRemoteTempFiles() error {
 				remotePath = dir + name
 			}
 			if err := conn.Delete(remotePath); err != nil {
-				log.Printf("[WARN] 删除远端临时文件失败: %s -> %v", remotePath, err)
+				slog.Warn("删除远端临时文件失败", "file", remotePath, "err", err)
 				continue
 			}
 			cleaned++
-			log.Printf("[INFO] 已清理远端临时文件: %s", remotePath)
+			slog.Info("已清理远端临时文件", "file", remotePath)
 		}
 	}
 	if cleaned > 0 {
-		log.Printf("[INFO] 远端临时文件清理完成: %d", cleaned)
+		slog.Info("远端临时文件清理完成", "count", cleaned)
 	}
 	return nil
 }
@@ -361,7 +361,7 @@ func (u *Uploader) ensureRemoteDir(conn *ftp.ServerConn, dir string) error {
 			if err := conn.ChangeDir(currentPath); err != nil {
 				if err := conn.MakeDir(currentPath); err != nil {
 					// 可能目录已存在（并发创建），忽略错误
-					log.Printf("[WARN] 创建远程目录可能失败（可能已存在）: %s", currentPath)
+					slog.Warn("创建远程目录可能失败（可能已存在）", "path", currentPath)
 				}
 			}
 		}

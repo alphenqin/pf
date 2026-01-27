@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -133,34 +133,34 @@ func (r *Reporter) reportOnce() {
 
 	b, err := json.Marshal(payload)
 	if err != nil {
-		log.Printf("[ERROR] 状态上报序列化失败: %v", err)
+		slog.Error("状态上报序列化失败", "err", err)
 		return
 	}
 
 	// 本地落盘（可选，无论 HTTP 是否成功都落盘）
 	if r.cfg.FilePath != "" {
 		if err := r.appendToFile(b); err != nil {
-			log.Printf("[WARN] 状态上报落盘失败: %v", err)
+			slog.Warn("状态上报落盘失败", "err", err)
 		}
 	}
 
 	// HTTP 上报（失败不影响落盘）
 	req, err := http.NewRequest(http.MethodPost, r.cfg.URL, bytes.NewReader(b))
 	if err != nil {
-		log.Printf("[ERROR] 状态上报请求创建失败: %v", err)
+		slog.Error("状态上报请求创建失败", "err", err)
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := r.client.Do(req)
 	if err != nil {
-		log.Printf("[ERROR] 状态上报失败: %v", err)
+		slog.Error("状态上报失败", "err", err)
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 300 {
-		log.Printf("[WARN] 状态上报返回非 2xx: %s", resp.Status)
+		slog.Warn("状态上报返回非 2xx", "status", resp.Status)
 	}
 }
 
