@@ -27,6 +27,7 @@ type Collector struct {
 	host     string
 
 	procPayloadEnricher func(procName string) map[string]interface{}
+	procCSVStats       func(procName string) (int64, int64)
 }
 
 const (
@@ -49,6 +50,12 @@ func NewCollector(ctx context.Context, cfg config.DiagConfig, dataDir string) *C
 // Call before Start().
 func (c *Collector) SetProcPayloadEnricher(fn func(procName string) map[string]interface{}) {
 	c.procPayloadEnricher = fn
+}
+
+// SetProcCSVStats sets optional CSV counters for proc metrics.
+// Call before Start().
+func (c *Collector) SetProcCSVStats(fn func(procName string) (int64, int64)) {
+	c.procCSVStats = fn
 }
 
 func (c *Collector) Start() {
@@ -248,8 +255,175 @@ func (c *Collector) collectProcMetrics(outDir string) ([]procMetric, bool) {
 				}
 			}
 		}
+		if c.procCSVStats != nil && metrics[i].Payload != nil {
+			if name, ok := metrics[i].Payload["name"].(string); ok {
+				csvTotal, csvDNS := c.procCSVStats(name)
+				metrics[i].CSVTotal = csvTotal
+				metrics[i].CSVDNS = csvDNS
+			}
+		}
 	}
+	metrics = aggregateProcMetrics(metrics)
 	return metrics, true
+}
+
+func aggregateProcMetrics(metrics []procMetric) []procMetric {
+	if len(metrics) <= 1 {
+		return metrics
+	}
+	type agg struct {
+		base       procMetric
+		cpuPct     float64
+		cpuTicks   int64
+		rssKB      int64
+		vsizeKB    int64
+		threads    int64
+		fdCount    int64
+		ioRead     int64
+		ioWrite    int64
+		ioCancelWB int64
+		csvTotal   int64
+		csvDNS     int64
+		startMin   int64
+		pids       []int
+		ppids      []int
+		cmdlines   []string
+		state      string
+		mixedState bool
+	}
+
+	byName := map[string]*agg{}
+	for _, m := range metrics {
+		name, _ := m.Payload["name"].(string)
+		if name == "" {
+			continue
+		}
+		a, ok := byName[name]
+		if !ok {
+			basePayload := map[string]interface{}{}
+			for k, v := range m.Payload {
+				basePayload[k] = v
+			}
+			a = &agg{
+				base:     procMetric{TS: m.TS, Host: m.Host, Src: m.Src, Level: m.Level, Msg: m.Msg, Payload: basePayload},
+				startMin: getInt64(m.Payload["start_time_tick"]),
+				state:    getString(m.Payload["state"]),
+			}
+			byName[name] = a
+		} else {
+			if st := getString(m.Payload["state"]); st != "" && st != a.state {
+				a.mixedState = true
+			}
+		}
+
+		a.cpuPct += getFloat64(m.Payload["cpu_pct"])
+		a.cpuTicks += getInt64(m.Payload["cpu_ticks"])
+		a.rssKB += getInt64(m.Payload["rss_kb"])
+		a.vsizeKB += getInt64(m.Payload["vsize_kb"])
+		a.threads += getInt64(m.Payload["threads"])
+		a.fdCount += getInt64(m.Payload["fd_count"])
+		a.ioRead += getInt64(m.Payload["io_read_bytes"])
+		a.ioWrite += getInt64(m.Payload["io_write_bytes"])
+		a.ioCancelWB += getInt64(m.Payload["io_cancelled_write_bytes"])
+		a.csvTotal += m.CSVTotal
+		a.csvDNS += m.CSVDNS
+
+		if st := getInt64(m.Payload["start_time_tick"]); st > 0 && (a.startMin == 0 || st < a.startMin) {
+			a.startMin = st
+		}
+		if pid := getInt64(m.Payload["pid"]); pid > 0 {
+			a.pids = append(a.pids, int(pid))
+		}
+		if ppid := getInt64(m.Payload["ppid"]); ppid > 0 {
+			a.ppids = append(a.ppids, int(ppid))
+		}
+		if cmd := getString(m.Payload["cmdline"]); cmd != "" {
+			a.cmdlines = append(a.cmdlines, cmd)
+		}
+	}
+
+	var out []procMetric
+	for _, a := range byName {
+		payload := a.base.Payload
+		payload["cpu_pct"] = round2(a.cpuPct)
+		payload["cpu_ticks"] = a.cpuTicks
+		payload["rss_kb"] = a.rssKB
+		payload["vsize_kb"] = a.vsizeKB
+		payload["threads"] = a.threads
+		payload["fd_count"] = a.fdCount
+		payload["io_read_bytes"] = a.ioRead
+		payload["io_write_bytes"] = a.ioWrite
+		payload["io_cancelled_write_bytes"] = a.ioCancelWB
+		a.base.CSVTotal = a.csvTotal
+		a.base.CSVDNS = a.csvDNS
+		if a.startMin > 0 {
+			payload["start_time_tick"] = a.startMin
+		}
+		if len(a.pids) > 0 {
+			payload["pid_list"] = a.pids
+			payload["instances"] = len(a.pids)
+		}
+		if len(a.ppids) > 0 {
+			payload["ppid_list"] = a.ppids
+		}
+		if len(a.cmdlines) > 0 {
+			payload["cmdline_list"] = a.cmdlines
+		}
+		if a.mixedState {
+			payload["state"] = "mixed"
+		}
+		out = append(out, a.base)
+	}
+	return out
+}
+
+func getFloat64(v interface{}) float64 {
+	switch t := v.(type) {
+	case float64:
+		return t
+	case float32:
+		return float64(t)
+	case int:
+		return float64(t)
+	case int64:
+		return float64(t)
+	case uint64:
+		return float64(t)
+	case int32:
+		return float64(t)
+	case uint32:
+		return float64(t)
+	default:
+		return 0
+	}
+}
+
+func getInt64(v interface{}) int64 {
+	switch t := v.(type) {
+	case int:
+		return int64(t)
+	case int64:
+		return t
+	case uint64:
+		return int64(t)
+	case int32:
+		return int64(t)
+	case uint32:
+		return int64(t)
+	case float64:
+		return int64(t)
+	case float32:
+		return int64(t)
+	default:
+		return 0
+	}
+}
+
+func getString(v interface{}) string {
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return ""
 }
 
 func readFirstJSONLine(path string) (map[string]interface{}, error) {
@@ -293,6 +467,7 @@ type diagEntry struct {
 	ts  time.Time
 	raw []byte
 	idx int
+	src string
 }
 
 func writeDiagJSON(path string, syslogEntries []syslogEntry, procMetrics []procMetric, envData map[string]interface{}, envAvailable bool) error {
@@ -318,7 +493,7 @@ func writeDiagJSON(path string, syslogEntries []syslogEntry, procMetrics []procM
 		if err != nil {
 			continue
 		}
-		entries = append(entries, diagEntry{ts: ts, raw: raw, idx: idx})
+		entries = append(entries, diagEntry{ts: ts, raw: raw, idx: idx, src: e.Src})
 		idx++
 	}
 	for _, e := range procMetrics {
@@ -335,15 +510,41 @@ func writeDiagJSON(path string, syslogEntries []syslogEntry, procMetrics []procM
 		if err != nil {
 			continue
 		}
-		entries = append(entries, diagEntry{ts: ts, raw: raw, idx: idx})
+		entries = append(entries, diagEntry{ts: ts, raw: raw, idx: idx, src: e.Src})
 		idx++
+	}
+	if len(procMetrics) > 0 {
+		var totalCSV int64
+		var totalDNS int64
+		first := procMetrics[0]
+		for _, e := range procMetrics {
+			totalCSV += e.CSVTotal
+			totalDNS += e.CSVDNS
+		}
+		rec := diagRecord{
+			TS:    first.TS,
+			Host:  first.Host,
+			Src:   "count",
+			Level: first.Level,
+			Msg:   first.Msg,
+			Payload: map[string]interface{}{
+				"csv_total": totalCSV,
+				"csv_dns":   totalDNS,
+			},
+		}
+		raw, err := json.Marshal(rec)
+		if err == nil {
+			ts := parseEntryTime(rec.TS)
+			entries = append(entries, diagEntry{ts: ts, raw: raw, idx: idx, src: rec.Src})
+			idx++
+		}
 	}
 	if envAvailable {
 		rec := buildEnvRecord(envData)
 		raw, err := json.Marshal(rec)
 		if err == nil {
 			ts := parseEntryTime(rec.TS)
-			entries = append(entries, diagEntry{ts: ts, raw: raw, idx: idx})
+			entries = append(entries, diagEntry{ts: ts, raw: raw, idx: idx, src: rec.Src})
 		}
 	}
 	if len(entries) == 0 {
@@ -366,6 +567,31 @@ func writeDiagJSON(path string, syslogEntries []syslogEntry, procMetrics []procM
 		}
 		return ti.Before(tj)
 	})
+
+	seenByTS := make(map[int64]map[string]struct{})
+	deduped := entries[:0]
+	for _, e := range entries {
+		if e.src != "syslog" {
+			deduped = append(deduped, e)
+			continue
+		}
+		tsKey := int64(0)
+		if !e.ts.IsZero() {
+			tsKey = e.ts.UnixNano()
+		}
+		seen, ok := seenByTS[tsKey]
+		if !ok {
+			seen = make(map[string]struct{})
+			seenByTS[tsKey] = seen
+		}
+		key := string(e.raw)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		deduped = append(deduped, e)
+	}
+	entries = deduped
 
 	out, err := os.Create(path)
 	if err != nil {
@@ -420,12 +646,12 @@ func cleanupDiagSources(stateDir string, envPath string) error {
 }
 
 type diagRecord struct {
-	TS      string                 `json:"ts"`
-	Host    string                 `json:"host"`
-	Src     string                 `json:"src"`
-	Level   string                 `json:"level,omitempty"`
-	Msg     string                 `json:"msg,omitempty"`
-	Payload map[string]interface{} `json:"payload,omitempty"`
+	TS       string                 `json:"ts"`
+	Host     string                 `json:"host"`
+	Src      string                 `json:"src"`
+	Level    string                 `json:"level,omitempty"`
+	Msg      string                 `json:"msg,omitempty"`
+	Payload  map[string]interface{} `json:"payload,omitempty"`
 }
 
 func buildEnvRecord(envData map[string]interface{}) diagRecord {

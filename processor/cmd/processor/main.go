@@ -113,14 +113,11 @@ func main() {
 	var csvDNS atomic.Int64
 	if cfg.Diag.Enabled {
 		diagCollector = diag.NewCollector(ctx, cfg.Diag, *dataDir)
-		diagCollector.SetProcPayloadEnricher(func(procName string) map[string]interface{} {
+		diagCollector.SetProcCSVStats(func(procName string) (int64, int64) {
 			if procName != "processor" {
-				return nil
+				return 0, 0
 			}
-			return map[string]interface{}{
-				"csv_total": csvTotal.Load(),
-				"csv_dns":   csvDNS.Load(),
-			}
+			return csvTotal.Load(), csvDNS.Load()
 		})
 		diagCollector.Start()
 		slog.Info("诊断采集已启用", "interval_sec", cfg.Diag.IntervalSec)

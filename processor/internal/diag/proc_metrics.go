@@ -16,6 +16,8 @@ type procMetric struct {
 	Level   string
 	Msg     string
 	Payload map[string]interface{}
+	CSVTotal int64
+	CSVDNS   int64
 }
 
 var procNames = []string{"pmacctd", "nfacctd", "processor"}
